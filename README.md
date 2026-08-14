@@ -44,6 +44,14 @@ The Python script in this folder is the core scheduling engine. It can generate 
 
 It evaluates valid breakdowns before generating the final schedule, which helps keep the output consistent with the league structure you want.
 
+**Interactive Schedule Breakdown Selection:**
+
+When the script runs in interactive mode, it displays all valid schedule breakdown combinations and prompts the user to choose the option that best fits the league setup.
+
+![Interactive schedule breakdown selection](./schedule_breakdown_selection.png)
+
+This prompt shows the available distribution options, the selected choice, and the generated season summary after the schedule is created.
+
 ### Web Experience
 
 The public interface at ootpschedules.com offers the same core logic in a cleaner, browser-based workflow. It is designed for users who want to:
