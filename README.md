@@ -63,6 +63,18 @@ The public interface at ootpschedules.com offers the same core logic in a cleane
 
 This makes the project approachable for both technical and non-technical users.
 
+### Browser Workflow
+
+The screenshots below show the main flow in the public web app from the initial form through schedule generation and saving the downloaded file:
+
+![Initial web form before any changes](./ootpschedules.com-1.png)
+
+![League settings filled in and Find Options selected](./ootpschedules.com-2.png)
+
+![Schedule preview after selecting Preview Schedule Only](./ootpschedules.com-3.png)
+
+![Saving the generated schedule file](./ootpschedules.com-4.png)
+
 ## Features
 
 - Multiple subleagues and divisions
