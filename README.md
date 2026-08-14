@@ -48,7 +48,7 @@ It evaluates valid breakdowns before generating the final schedule, which helps 
 
 When the script runs in interactive mode, it displays all valid schedule breakdown combinations and prompts the user to choose the option that best fits the league setup.
 
-![Interactive schedule breakdown selection](./schedule_breakdown_selection.png)
+![Interactive schedule breakdown selection](./static/schedule_breakdown_selection.png)
 
 This prompt shows the available distribution options, the selected choice, and the generated season summary after the schedule is created.
 
@@ -67,13 +67,13 @@ This makes the project approachable for both technical and non-technical users.
 
 The screenshots below show the main flow in the public web app from the initial form through schedule generation and saving the downloaded file:
 
-![Initial web form before any changes](./ootpschedules.com-1.png)
+![Initial web form before any changes](./static/ootpschedules.com-1.png)
 
-![League settings filled in and Find Options selected](./ootpschedules.com-2.png)
+![League settings filled in and Find Options selected](./static/ootpschedules.com-2.png)
 
-![Schedule preview after selecting Preview Schedule Only](./ootpschedules.com-3.png)
+![Schedule preview after selecting Preview Schedule Only](./static/ootpschedules.com-3.png)
 
-![Saving the generated schedule file](./ootpschedules.com-4.png)
+![Saving the generated schedule file](./static/ootpschedules.com-4.png)
 
 ## Features
 
