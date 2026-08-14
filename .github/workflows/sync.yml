@@ -1,0 +1,40 @@
+name: Sync Generator Script to Web App Repo
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'ootp_schedule_generator.py'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Repo
+        uses: actions/checkout@v4
+
+      - name: Checkout Target Private Repo
+        uses: actions/checkout@v4
+        with:
+          repository: 'matthewrstreeter/ootpschedules' # Change if your private repo name differs
+          token: ${{ secrets.SYNC_DESTINATION_TOKEN }}
+          path: 'target_repo'
+
+      - name: Copy File & Push Changes
+        run: |
+          # Copy source file into target repo folder
+          cp ootp_schedule_generator.py target_repo/ootp_schedule_generator.py
+          
+          cd target_repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ootp_schedule_generator.py
+
+          # Commit and push only if the file actually changed
+          if git status --porcelain | grep -q .; then
+            git commit -m "sync: auto-update ootp_schedule_generator.py from source repo"
+            git push
+          else
+            echo "No changes detected in ootp_schedule_generator.py."
+          fi
