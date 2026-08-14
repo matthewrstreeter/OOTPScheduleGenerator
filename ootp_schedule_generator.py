@@ -116,6 +116,10 @@ def find_all_valid_distributions(total_games, d_opp, s_opp, i_opp, is_balanced=F
     # Update range to start at 4 instead of 2 to avoid impossible 1:1 H/A splits
     for g_d in range(4, total_games + 1, 2):
         for g_s in range(4 if s_opp > 0 else 0, total_games + 1, 2 if s_opp > 0 else total_games + 1):
+            # --- NEW: Enforce balanced schedule logic ---
+            if is_balanced and s_opp > 0 and g_d != g_s:
+                continue
+            # --------------------------------------------
             used = d_opp * g_d + s_opp * g_s
             rem = total_games - used
             if rem < 0:
@@ -603,7 +607,7 @@ def main():
     s_opp = (args.divisions - 1) * args.teams_per_div
     i_opp = (args.subleagues - 1) * args.divisions * args.teams_per_div if il_flag == "1" else 0
 
-    solutions = find_all_valid_distributions(args.games, d_opp, s_opp, i_opp)
+    solutions = find_all_valid_distributions(args.games, d_opp, s_opp, i_opp, is_balanced=(bg_flag == "1"))
 
     if not solutions:
         print(f"Error: No valid game distributions found for {args.games} games.")
