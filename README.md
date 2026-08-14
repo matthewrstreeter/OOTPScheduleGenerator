@@ -1,4 +1,4 @@
-# OOTP Schedule Generator
+# ⚾️ OOTP Custom Schedule Generator
 
 Build realistic custom baseball schedules for your OOTP league with a local Python engine and the polished browser experience at ootpschedules.com.
 
