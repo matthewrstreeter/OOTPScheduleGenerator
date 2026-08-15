@@ -35,41 +35,76 @@ def get_weekday(day_index, start_day):
     return (start_day - 1 + day_index - 1) % 7 + 1
 
 
-def decompose_games_to_series(total_games_per_opp):
-    """Decomposes a game count per opponent into 3-game, 2-game, and 4-game series (1:1 H/A split)."""
-    half_games = total_games_per_opp // 2
-    
-    rem = half_games
-    num_3g = rem // 3
-    rem %= 3
+def decompose_games_to_series(total_games_per_opp, allow_uneven=False):
+    """Decomposes a game count per opponent into 3-game, 2-game, and 4-game series."""
+    if not allow_uneven:
+        # --- EXISTING EVEN-SPLIT LOGIC ---
+        half_games = total_games_per_opp // 2
+        
+        rem = half_games
+        num_3g = rem // 3
+        rem %= 3
 
-    num_2g = 0
-    num_4g = 0
+        num_2g = 0
+        num_4g = 0
 
-    if rem == 1:
-        if num_3g > 0:
-            num_3g -= 1
-            num_4g += 1
-        else:
+        if rem == 1:
+            if num_3g > 0:
+                num_3g -= 1
+                num_4g += 1
+            else:
+                num_2g += 1
+        elif rem == 2:
             num_2g += 1
-    elif rem == 2:
-        num_2g += 1
 
-    spread = []
-    for type_idx, count in enumerate([num_3g, num_4g, num_2g]):
-        length = [3, 4, 2][type_idx]
-        for i in range(count):
-            pos = (i + 0.5) / count if count > 0 else 0
-            pos += type_idx * 0.0001
-            spread.append((pos, [length, length]))
+        spread = []
+        for type_idx, count in enumerate([num_3g, num_4g, num_2g]):
+            length = [3, 4, 2][type_idx]
+            for i in range(count):
+                pos = (i + 0.5) / count if count > 0 else 0
+                pos += type_idx * 0.0001
+                spread.append((pos, [length, length]))
+                
+        spread.sort(key=lambda x: x[0])
+        
+        series_list = []
+        for pos, pair in spread:
+            series_list.extend(pair)
+
+        return series_list
+        
+    else:
+        # --- NEW UNEVEN SPLIT LOGIC ---
+        rem = total_games_per_opp
+        num_3g = rem // 3
+        rem %= 3
+
+        num_2g = 0
+        num_4g = 0
+
+        if rem == 1:
+            if num_3g > 0:
+                num_3g -= 1
+                num_4g += 1
+            else:
+                num_2g += 1 
+        elif rem == 2:
+            num_2g += 1
+
+        spread = []
+        for type_idx, count in enumerate([num_3g, num_4g, num_2g]):
+            length = [3, 4, 2][type_idx]
+            for i in range(count):
+                pos = (i + 0.5) / count if count > 0 else 0
+                spread.append((pos + type_idx * 0.001, length))
+                
+        spread.sort(key=lambda x: x[0])
+        
+        series_list = []
+        for pos, length in spread:
+            series_list.append(length)
             
-    spread.sort(key=lambda x: x[0])
-    
-    series_list = []
-    for pos, pair in spread:
-        series_list.extend(pair)
-
-    return series_list
+        return series_list
 
 
 def generate_circle_rounds(team_list):
@@ -109,17 +144,19 @@ def generate_bipartite_rounds(group_a, group_b):
     return rounds
 
 
-def find_all_valid_distributions(total_games, d_opp, s_opp, i_opp, is_balanced=False):
+def find_all_valid_distributions(total_games, d_opp, s_opp, i_opp, is_balanced=False, allow_uneven=False):
     """Finds all valid game breakdown configurations (allowing mixed series lengths)."""
     valid_sols = []
 
-    # Update range to start at 4 instead of 2 to avoid impossible 1:1 H/A splits
-    for g_d in range(4, total_games + 1, 2):
-        for g_s in range(4 if s_opp > 0 else 0, total_games + 1, 2 if s_opp > 0 else total_games + 1):
-            # --- NEW: Enforce balanced schedule logic ---
+    d_start, d_step = (3, 1) if allow_uneven else (4, 2)
+    s_start, s_step = (3 if s_opp > 0 else 0, 1) if allow_uneven else (4 if s_opp > 0 else 0, 2)
+    
+    for g_d in range(d_start, total_games + 1, d_step):
+        for g_s in range(s_start, total_games + 1, s_step if s_opp > 0 else total_games + 1):
+            
             if is_balanced and s_opp > 0 and g_d != g_s:
                 continue
-            # --------------------------------------------
+
             used = d_opp * g_d + s_opp * g_s
             rem = total_games - used
             if rem < 0:
@@ -128,14 +165,14 @@ def find_all_valid_distributions(total_games, d_opp, s_opp, i_opp, is_balanced=F
             if i_opp > 0:
                 if rem > 0 and rem % i_opp == 0:
                     g_i = rem // i_opp
-                    # Enforce minimum 4 games for Interleague to prevent 1-game series logic errors
                     if g_i >= 4 and g_i % 2 == 0:
                         valid_sols.append({
                             "g_div": g_d, "div_total": d_opp * g_d,
                             "g_sub": g_s, "sub_total": s_opp * g_s,
                             "g_inter": g_i, "inter_total": i_opp * g_i,
                             "total_games": total_games,
-                            "is_pure_3g": (g_d % 3 == 0 and g_s % 3 == 0 and g_i % 3 == 0)
+                            "is_pure_3g": (g_d % 3 == 0 and g_s % 3 == 0 and g_i % 3 == 0),
+                            "allow_uneven": allow_uneven
                         })
             else:
                 if rem == 0:
@@ -144,11 +181,13 @@ def find_all_valid_distributions(total_games, d_opp, s_opp, i_opp, is_balanced=F
                         "g_sub": g_s, "sub_total": s_opp * g_s,
                         "g_inter": 0, "inter_total": 0,
                         "total_games": total_games,
-                        "is_pure_3g": (g_d % 3 == 0 and g_s % 3 == 0)
+                        "is_pure_3g": (g_d % 3 == 0 and g_s % 3 == 0),
+                        "allow_uneven": allow_uneven
                     })
 
     valid_sols.sort(key=lambda x: (x["g_div"], x["is_pure_3g"], x["g_sub"]), reverse=True)
     return valid_sols
+
 
 def prompt_user_for_distribution(solutions, d_opp, s_opp, i_opp):
     """Displays formatted breakdown choices and prompts user selection."""
@@ -159,9 +198,10 @@ def prompt_user_for_distribution(solutions, d_opp, s_opp, i_opp):
     print("-" * 85)
 
     for idx, sol in enumerate(solutions, start=1):
-        div_series = decompose_games_to_series(sol['g_div'])
-        sub_series = decompose_games_to_series(sol['g_sub']) if s_opp > 0 else []
-        inter_series = decompose_games_to_series(sol['g_inter']) if i_opp > 0 else []
+        allow_u = sol.get("allow_uneven", False)
+        div_series = decompose_games_to_series(sol['g_div'], allow_uneven=allow_u)
+        sub_series = decompose_games_to_series(sol['g_sub'], allow_uneven=allow_u) if s_opp > 0 else []
+        inter_series = decompose_games_to_series(sol['g_inter'], allow_uneven=allow_u) if i_opp > 0 else []
 
         div_str = f"{sol['g_div']}g ({sol['div_total']}g) [{len(div_series)} ser]"
         sub_str = f"{sol['g_sub']}g ({sol['sub_total']}g) [{len(sub_series)} ser]" if s_opp > 0 else "N/A"
@@ -201,9 +241,10 @@ def build_dynamic_schedule(
 
     total_teams = team_id - 1
 
-    div_series_lengths = decompose_games_to_series(chosen_sol["g_div"])
-    sub_series_lengths = decompose_games_to_series(chosen_sol["g_sub"]) if chosen_sol["g_sub"] > 0 else []
-    inter_series_lengths = decompose_games_to_series(chosen_sol["g_inter"]) if chosen_sol["g_inter"] > 0 else []
+    allow_u = chosen_sol.get("allow_uneven", False)
+    div_series_lengths = decompose_games_to_series(chosen_sol["g_div"], allow_uneven=allow_u)
+    sub_series_lengths = decompose_games_to_series(chosen_sol["g_sub"], allow_uneven=allow_u) if chosen_sol["g_sub"] > 0 else []
+    inter_series_lengths = decompose_games_to_series(chosen_sol["g_inter"], allow_uneven=allow_u) if chosen_sol["g_inter"] > 0 else []
 
     div_windows, sub_windows, inter_windows = [], [], []
 
@@ -216,8 +257,8 @@ def build_dynamic_schedule(
         num_div_rounds = len(next(iter(div_rounds_map.values())))
 
         for cycle_idx, s_len in enumerate(div_series_lengths):
-            swap = cycle_idx % 2 == 1
             for r_idx in range(num_div_rounds):
+                swap = (cycle_idx + r_idx) % 2 == 1
                 window = []
                 for (sl_id, div_id), rounds in div_rounds_map.items():
                     for t1, t2 in rounds[r_idx]:
@@ -233,10 +274,10 @@ def build_dynamic_schedule(
         div_pairs = [(div_keys[i], div_keys[j]) for i in range(len(div_keys)) for j in range(i + 1, len(div_keys))]
 
         for cycle_idx, s_len in enumerate(sub_series_lengths):
-            swap = cycle_idx % 2 == 1
             for d1_k, d2_k in div_pairs:
                 sample_bipartite = generate_bipartite_rounds(structure[1][d1_k], structure[1][d2_k])
                 for r_idx in range(len(sample_bipartite)):
+                    swap = (cycle_idx + r_idx) % 2 == 1
                     window = []
                     for sl in structure.values():
                         cr = generate_bipartite_rounds(sl[d1_k], sl[d2_k])
@@ -254,8 +295,8 @@ def build_dynamic_schedule(
         cross_rounds = generate_bipartite_rounds(sl1_teams, sl2_teams)
 
         for cycle_idx, s_len in enumerate(inter_series_lengths):
-            swap = cycle_idx % 2 == 1
             for r_idx in range(len(cross_rounds)):
+                swap = (cycle_idx + r_idx) % 2 == 1
                 window = []
                 for t1, t2 in cross_rounds[r_idx]:
                     window.append({
@@ -266,21 +307,18 @@ def build_dynamic_schedule(
                 inter_windows.append(window)
 
     # ---------------------------------------------------------
-    # NEW LOGIC: Anchor Start and End with Divisional Matchups
+    # Anchor Start and End with Divisional Matchups
     # and Proportionally Distribute Remaining Series
     # ---------------------------------------------------------
     windows = []
     
-    # Extract the first and last divisional windows to anchor the season
     start_window = div_windows.pop(0) if div_windows else None
     end_window = div_windows.pop(-1) if div_windows else None
     
-    # Proportionally space the remaining middle series to prevent clustering
     spread = []
     
     if div_windows:
         for i, w in enumerate(div_windows):
-            # Calculate a relative float position between 0.0 and 1.0
             spread.append(((i + 0.5) / len(div_windows), 0, w))
             
     if sub_windows:
@@ -291,13 +329,10 @@ def build_dynamic_schedule(
         for i, w in enumerate(inter_windows):
             spread.append(((i + 0.5) / len(inter_windows), 2, w))
             
-    # Sort by relative position (and then by source type to break ties consistently)
     spread.sort(key=lambda x: (x[0], x[1]))
     
-    # Extract just the window data now that it is evenly sorted
     middle_windows = [item[2] for item in spread]
                 
-    # Reassemble the season with the divisional anchors
     if start_window:
         windows.append(start_window)
         
@@ -345,7 +380,6 @@ def expand_to_slotted_games(windows, target_asg_day=0, asg_before=2, asg_after=1
         first_half_off_days = [0] * W
         
         if W > 1 and off_days_needed > 0:
-            # Candidate slots: windows 1 to W-2 (locking final window W-1)
             avail_slots = list(range(1, W - 1))
             if off_days_needed > len(avail_slots):
                 avail_slots = list(range(1, W))
@@ -353,7 +387,6 @@ def expand_to_slotted_games(windows, target_asg_day=0, asg_before=2, asg_after=1
             n_avail = len(avail_slots)
             num_to_place = min(off_days_needed, n_avail)
             
-            # Evenly select distinct indices so sum(first_half_off_days) == off_days_needed
             selected_indices = set()
             for k in range(num_to_place):
                 slot_idx = int(round((k + 0.5) * n_avail / num_to_place - 0.5))
@@ -460,26 +493,38 @@ def expand_to_slotted_games(windows, target_asg_day=0, asg_before=2, asg_after=1
     return sorted(slotted_games, key=lambda x: (x["day"], x["home"])), actual_asg_day
 
 
-def generate_html_report(slotted_games, total_teams, html_filename):
-    """Generates a standalone HTML file with a schedule grid and evaluation metrics."""
+def generate_preview_data(slotted_games, total_teams):
+    """Generates dictionary grid and metrics for schedule preview."""
     if not slotted_games:
-        return
+        return {"grid": {}, "metrics": {}}
 
     max_day = max(g["day"] for g in slotted_games)
     
-    # Initialize data structures
     grid = {t: {d: "" for d in range(1, max_day + 1)} for t in range(1, total_teams + 1)}
     metrics = {t: {"home": 0, "away": 0} for t in range(1, total_teams + 1)}
     
-    # Populate data
     for g in slotted_games:
         day, h, a = g["day"], g["home"], g["away"]
         grid[h][day] = f"vs {a}"
         grid[a][day] = f"@ {h}"
         metrics[h]["home"] += 1
         metrics[a]["away"] += 1
+        
+    return {"grid": grid, "metrics": metrics}
 
-    # Build HTML string
+
+def generate_html_report(slotted_games, total_teams, html_filename):
+    """Generates a standalone HTML file with a schedule grid and evaluation metrics."""
+    if not slotted_games:
+        return
+
+    # Fetch grid and metrics using the newly separated function
+    preview = generate_preview_data(slotted_games, total_teams)
+    grid = preview["grid"]
+    metrics = preview["metrics"]
+    
+    max_day = max(g["day"] for g in slotted_games)
+
     html = [
         "<!DOCTYPE html>",
         "<html><head><title>Schedule Preview</title>",
@@ -499,32 +544,28 @@ def generate_html_report(slotted_games, total_teams, html_filename):
         "</style></head><body>"
     ]
     
-    # --- Evaluation View ---
     html.append("<h2>Schedule Evaluation</h2>")
     html.append("<div style='max-width: 400px;'><table style='min-width: 100%;'>")
     html.append("<tr><th>Team ID</th><th>Home Games</th><th>Away Games</th><th>Total</th></tr>")
+    
     for t in range(1, total_teams + 1):
         total_g = metrics[t]['home'] + metrics[t]['away']
         html.append(f"<tr><th>T{t}</th><td>{metrics[t]['home']}</td><td>{metrics[t]['away']}</td><td>{total_g}</td></tr>")
     html.append("</table></div><br>")
     
-    # --- Grid View ---
     html.append("<h2>Schedule Grid</h2>")
     
-    # Legend
     html.append("<div class='legend'>")
     html.append("<strong>Legend:</strong> <span class='home'>Green (vs) = Home Game</span> &nbsp;|&nbsp; <span class='away'>Red (@) = Away Game</span>")
     html.append("</div>")
     
     html.append("<div class='table-container'><table>")
     
-    # Header Row (Teams on X-Axis)
     html.append("<tr><th class='sticky-corner'>Day</th>")
     for t in range(1, total_teams + 1):
         html.append(f"<th class='sticky-top'>T{t}</th>")
     html.append("</tr>")
     
-    # Day Rows (Days on Y-Axis)
     for d in range(1, max_day + 1):
         html.append(f"<tr><th class='sticky-left'>D{d}</th>")
         for t in range(1, total_teams + 1):
@@ -540,33 +581,6 @@ def generate_html_report(slotted_games, total_teams, html_filename):
         f.write("\n".join(html))
 
 
-def generate_preview_data(slotted_games, total_teams):
-    """Generates evaluation metrics and schedule grid data for frontend JSON consumption."""
-    if not slotted_games:
-        return {"grid": {}, "metrics": {}, "max_day": 0, "total_teams": total_teams}
-
-    max_day = max(g["day"] for g in slotted_games)
-    
-    # Initialize data structures
-    grid = {str(t): {str(d): "" for d in range(1, max_day + 1)} for t in range(1, total_teams + 1)}
-    metrics = {str(t): {"home": 0, "away": 0} for t in range(1, total_teams + 1)}
-    
-    # Populate data
-    for g in slotted_games:
-        day, h, a = str(g["day"]), str(g["home"]), str(g["away"])
-        grid[h][day] = f"vs {a}"
-        grid[a][day] = f"@ {h}"
-        metrics[h]["home"] += 1
-        metrics[a]["away"] += 1
-
-    return {
-        "grid": grid,
-        "metrics": metrics,
-        "max_day": max_day,
-        "total_teams": total_teams
-    }
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="OOTP Schedule XML Generator supporting Mixed-Length Series & Interactive Options"
@@ -577,6 +591,7 @@ def main():
     parser.add_argument("-g", "--games", type=int, default=162)
     parser.add_argument("-il", "--interleague", type=int, choices=[0, 1], default=None)
     parser.add_argument("-bg", "--balanced", type=int, choices=[0, 1], default=0)
+    parser.add_argument("-u", "--uneven", type=int, choices=[0, 1], default=0, help="Allow uneven home/away splits (e.g., 13-game series)")
     parser.add_argument("-a", "--allstar-game-day", type=int, default=0, help="Target calendar day for the ASG")
     parser.add_argument("-aw", "--asg-weekday", type=str, default=None, help="Force ASG to fall on this day of the week (e.g., Thursday). Overrides -a.")
     parser.add_argument("-ab", "--asg-before", type=int, default=2)
@@ -607,7 +622,7 @@ def main():
     s_opp = (args.divisions - 1) * args.teams_per_div
     i_opp = (args.subleagues - 1) * args.divisions * args.teams_per_div if il_flag == "1" else 0
 
-    solutions = find_all_valid_distributions(args.games, d_opp, s_opp, i_opp, is_balanced=(bg_flag == "1"))
+    solutions = find_all_valid_distributions(args.games, d_opp, s_opp, i_opp, is_balanced=(bg_flag == "1"), allow_uneven=(args.uneven == 1))
 
     if not solutions:
         print(f"Error: No valid game distributions found for {args.games} games.")
@@ -621,11 +636,9 @@ def main():
     sl_parts = [f"SL{sl}_" + "_".join([f"D{d}_T{args.teams_per_div}" for d in range(1, args.divisions + 1)]) for sl in range(1, args.subleagues + 1)]
     type_attr = f"{il_prefix}_G{args.games}_" + "_".join(sl_parts)
 
-    # Ensure the assets directory exists
     output_dir = "assets"
     os.makedirs(output_dir, exist_ok=True)
 
-    # Prefix the filename with the assets directory
     base_filename = args.output if args.output else f"{type_attr}.lsdl"
     filename = os.path.join(output_dir, base_filename)
 
@@ -665,7 +678,6 @@ def main():
     with open(filename, "w") as f:
         f.write(xmlstr)
 
-    # --- NEW: Generate the HTML report ---
     html_filename = filename.replace(".lsdl", ".html")
     generate_html_report(slotted_games, total_teams, html_filename)
 
