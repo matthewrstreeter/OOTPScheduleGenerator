@@ -808,51 +808,8 @@ def expand_to_game_level_games(
     return sorted(games, key=lambda game: (game["day"], game["home"])), actual_asg_day
 
 
-def expand_to_slotted_games(
-    windows,
-    target_asg_day=0,
-    asg_before=2,
-    asg_after=1,
-    asg_weekday_num=None,
-    start_dow=2,
-    max_consecutive_games=20,
-    max_consecutive_home_or_road=12,
-    avoid_league_off_days=False,
-    league_off_day_interval=None,
-    max_off_days_in_window=5,
-    schedule_allstar_game=False,
-):
-    slotted_games = []
-    actual_asg_day = 0
-
-    team_ids = sorted({
-        team
-        for window in windows
-        for series in window
-        for team in (series["home"], series["away"])
-    })
-    if target_asg_day == 0 and (asg_weekday_num is not None or schedule_allstar_game):
-        baseline_games, _ = expand_to_slotted_games(
-            windows,
-            start_dow=start_dow,
-            avoid_league_off_days=avoid_league_off_days,
-            league_off_day_interval=5,
-            max_off_days_in_window=max_off_days_in_window,
-            schedule_allstar_game=False,
-        )
-        target_asg_day = max(game["day"] for game in baseline_games) // 2 + 2
-    if target_asg_day > 0 or asg_weekday_num is not None:
-        actual_asg_day = target_asg_day
-        if asg_weekday_num is not None:
-            diff = asg_weekday_num - get_weekday(target_asg_day, start_dow)
-            if diff > 3:
-                diff -= 7
-            elif diff < -3:
-                diff += 7
-            actual_asg_day += diff
-
-    break_start = actual_asg_day - asg_before if actual_asg_day > 0 else None
-    break_end = actual_asg_day + asg_after if actual_asg_day > 0 else None
+def _build_conflict_free_rounds(windows, team_ids):
+    """Build the series-pairing rounds once; independent of ASG placement so callers can reuse it."""
     rounds = [list(window) for window in windows if window]
     all_series_lengths = {
         series["length"]
@@ -949,6 +906,24 @@ def expand_to_slotted_games(
         if rounds is None:
             raise RuntimeError("Unable to form conflict-free rounds from the remaining series.")
 
+    return rounds, compatible_series_schedule, mixed_compatible_schedule
+
+
+def _place_series_into_days(
+    rounds,
+    team_ids,
+    compatible_series_schedule,
+    mixed_compatible_schedule,
+    break_start,
+    break_end,
+    avoid_league_off_days,
+    league_off_day_interval,
+    max_off_days_in_window,
+    max_consecutive_games,
+    max_consecutive_home_or_road,
+):
+    """Place a conflict-free round pairing into calendar days, respecting off-day/ASG-break rules."""
+    slotted_games = []
     next_start_day = 1
     consecutive_game_days = 0
     streak_break_interval = min(max_consecutive_games, max_consecutive_home_or_road)
@@ -1209,6 +1184,63 @@ def expand_to_slotted_games(
             if game_streak > max_consecutive_games:
                 raise RuntimeError(f"Team {team} exceeds the consecutive-game limit.")
             previous_day = day
+
+    return slotted_games
+
+
+def expand_to_slotted_games(
+    windows,
+    target_asg_day=0,
+    asg_before=2,
+    asg_after=1,
+    asg_weekday_num=None,
+    start_dow=2,
+    max_consecutive_games=20,
+    max_consecutive_home_or_road=12,
+    avoid_league_off_days=False,
+    league_off_day_interval=None,
+    max_off_days_in_window=5,
+    schedule_allstar_game=False,
+):
+    actual_asg_day = 0
+
+    team_ids = sorted({
+        team
+        for window in windows
+        for series in window
+        for team in (series["home"], series["away"])
+    })
+
+    # The round pairing is independent of ASG placement, so build it once and
+    # reuse it for both the baseline pass (below) and the real placement pass.
+    rounds, compatible_series_schedule, mixed_compatible_schedule = _build_conflict_free_rounds(
+        windows, team_ids
+    )
+
+    if target_asg_day == 0 and (asg_weekday_num is not None or schedule_allstar_game):
+        baseline_games = _place_series_into_days(
+            list(rounds), team_ids, compatible_series_schedule, mixed_compatible_schedule,
+            None, None, avoid_league_off_days, 5, max_off_days_in_window, 20, 12,
+        )
+        target_asg_day = max(game["day"] for game in baseline_games) // 2 + 2
+    if target_asg_day > 0 or asg_weekday_num is not None:
+        actual_asg_day = target_asg_day
+        if asg_weekday_num is not None:
+            diff = asg_weekday_num - get_weekday(target_asg_day, start_dow)
+            if diff > 3:
+                diff -= 7
+            elif diff < -3:
+                diff += 7
+            actual_asg_day += diff
+
+    break_start = actual_asg_day - asg_before if actual_asg_day > 0 else None
+    break_end = actual_asg_day + asg_after if actual_asg_day > 0 else None
+
+    slotted_games = _place_series_into_days(
+        list(rounds), team_ids, compatible_series_schedule, mixed_compatible_schedule,
+        break_start, break_end, avoid_league_off_days, league_off_day_interval, max_off_days_in_window,
+        max_consecutive_games, max_consecutive_home_or_road,
+    )
 
     return slotted_games, actual_asg_day
 
