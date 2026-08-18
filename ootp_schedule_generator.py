@@ -19,6 +19,9 @@ DAY_MAP = {
     "saturday": 7, "sat": 7, "7": 7,
 }
 
+# Avoid oversubscribing threads on small servers (e.g. 1 vCPU droplets).
+CPU_SEARCH_WORKERS = max(1, min(8, os.cpu_count() or 1))
+
 MONTH_MAP = {
     "january": 1, "jan": 1, "1": 1,
     "february": 2, "feb": 2, "2": 2,
@@ -358,7 +361,7 @@ def build_team_rest_calendar(
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = time_limit_seconds
-    solver.parameters.num_search_workers = 8
+    solver.parameters.num_search_workers = CPU_SEARCH_WORKERS
     solver.parameters.random_seed = random_seed
     status = solver.Solve(model)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
@@ -775,7 +778,7 @@ def expand_to_game_level_games(
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = time_limit_seconds
-    solver.parameters.num_search_workers = 8
+    solver.parameters.num_search_workers = CPU_SEARCH_WORKERS
     solver.parameters.repair_hint = True
     solver.parameters.hint_conflict_limit = 1000
     solver.parameters.use_lns = True
