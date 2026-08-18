@@ -1,8 +1,13 @@
 import argparse
 import os
+import random
 import sys
 import xml.etree.ElementTree as ET
+from collections import defaultdict
 from xml.dom import minidom
+
+import networkx as nx
+from ortools.sat.python import cp_model
 
 DAY_MAP = {
     "sunday": 1, "sun": 1, "1": 1,
@@ -35,76 +40,12 @@ def get_weekday(day_index, start_day):
     return (start_day - 1 + day_index - 1) % 7 + 1
 
 
-def decompose_games_to_series(total_games_per_opp, allow_uneven=False):
-    """Decomposes a game count per opponent into 3-game, 2-game, and 4-game series."""
-    if not allow_uneven:
-        # --- EXISTING EVEN-SPLIT LOGIC ---
-        half_games = total_games_per_opp // 2
-        
-        rem = half_games
-        num_3g = rem // 3
-        rem %= 3
+def decompose_games_to_series(total_games_per_opp):
+    """Decompose an even opponent total into two-game series."""
+    if total_games_per_opp < 2 or total_games_per_opp % 2:
+        raise ValueError("Opponent totals must be positive even numbers.")
 
-        num_2g = 0
-        num_4g = 0
-
-        if rem == 1:
-            if num_3g > 0:
-                num_3g -= 1
-                num_4g += 1
-            else:
-                num_2g += 1
-        elif rem == 2:
-            num_2g += 1
-
-        spread = []
-        for type_idx, count in enumerate([num_3g, num_4g, num_2g]):
-            length = [3, 4, 2][type_idx]
-            for i in range(count):
-                pos = (i + 0.5) / count if count > 0 else 0
-                pos += type_idx * 0.0001
-                spread.append((pos, [length, length]))
-                
-        spread.sort(key=lambda x: x[0])
-        
-        series_list = []
-        for pos, pair in spread:
-            series_list.extend(pair)
-
-        return series_list
-        
-    else:
-        # --- NEW UNEVEN SPLIT LOGIC ---
-        rem = total_games_per_opp
-        num_3g = rem // 3
-        rem %= 3
-
-        num_2g = 0
-        num_4g = 0
-
-        if rem == 1:
-            if num_3g > 0:
-                num_3g -= 1
-                num_4g += 1
-            else:
-                num_2g += 1 
-        elif rem == 2:
-            num_2g += 1
-
-        spread = []
-        for type_idx, count in enumerate([num_3g, num_4g, num_2g]):
-            length = [3, 4, 2][type_idx]
-            for i in range(count):
-                pos = (i + 0.5) / count if count > 0 else 0
-                spread.append((pos + type_idx * 0.001, length))
-                
-        spread.sort(key=lambda x: x[0])
-        
-        series_list = []
-        for pos, length in spread:
-            series_list.append(length)
-            
-        return series_list
+    return [2] * (total_games_per_opp // 2)
 
 
 def generate_circle_rounds(team_list):
@@ -144,19 +85,17 @@ def generate_bipartite_rounds(group_a, group_b):
     return rounds
 
 
-def find_all_valid_distributions(total_games, d_opp, s_opp, i_opp, is_balanced=False, allow_uneven=False):
+def find_all_valid_distributions(total_games, d_opp, s_opp, i_opp, is_balanced=False):
     """Finds all valid game breakdown configurations (allowing mixed series lengths)."""
     valid_sols = []
 
-    d_start, d_step = (3, 1) if allow_uneven else (4, 2)
-    s_start, s_step = (3 if s_opp > 0 else 0, 1) if allow_uneven else (4 if s_opp > 0 else 0, 2)
-    
-    for g_d in range(d_start, total_games + 1, d_step):
-        for g_s in range(s_start, total_games + 1, s_step if s_opp > 0 else total_games + 1):
-            
+    # Update range to start at 4 instead of 2 to avoid impossible 1:1 H/A splits
+    for g_d in range(4, total_games + 1, 2):
+        for g_s in range(4 if s_opp > 0 else 0, total_games + 1, 2 if s_opp > 0 else total_games + 1):
+            # --- NEW: Enforce balanced schedule logic ---
             if is_balanced and s_opp > 0 and g_d != g_s:
                 continue
-
+            # --------------------------------------------
             used = d_opp * g_d + s_opp * g_s
             rem = total_games - used
             if rem < 0:
@@ -165,14 +104,14 @@ def find_all_valid_distributions(total_games, d_opp, s_opp, i_opp, is_balanced=F
             if i_opp > 0:
                 if rem > 0 and rem % i_opp == 0:
                     g_i = rem // i_opp
+                    # Enforce minimum 4 games for Interleague to prevent 1-game series logic errors
                     if g_i >= 4 and g_i % 2 == 0:
                         valid_sols.append({
                             "g_div": g_d, "div_total": d_opp * g_d,
                             "g_sub": g_s, "sub_total": s_opp * g_s,
                             "g_inter": g_i, "inter_total": i_opp * g_i,
                             "total_games": total_games,
-                            "is_pure_3g": (g_d % 3 == 0 and g_s % 3 == 0 and g_i % 3 == 0),
-                            "allow_uneven": allow_uneven
+                            "is_pure_3g": (g_d % 3 == 0 and g_s % 3 == 0 and g_i % 3 == 0)
                         })
             else:
                 if rem == 0:
@@ -181,13 +120,11 @@ def find_all_valid_distributions(total_games, d_opp, s_opp, i_opp, is_balanced=F
                         "g_sub": g_s, "sub_total": s_opp * g_s,
                         "g_inter": 0, "inter_total": 0,
                         "total_games": total_games,
-                        "is_pure_3g": (g_d % 3 == 0 and g_s % 3 == 0),
-                        "allow_uneven": allow_uneven
+                        "is_pure_3g": (g_d % 3 == 0 and g_s % 3 == 0)
                     })
 
     valid_sols.sort(key=lambda x: (x["g_div"], x["is_pure_3g"], x["g_sub"]), reverse=True)
     return valid_sols
-
 
 def prompt_user_for_distribution(solutions, d_opp, s_opp, i_opp):
     """Displays formatted breakdown choices and prompts user selection."""
@@ -198,10 +135,9 @@ def prompt_user_for_distribution(solutions, d_opp, s_opp, i_opp):
     print("-" * 85)
 
     for idx, sol in enumerate(solutions, start=1):
-        allow_u = sol.get("allow_uneven", False)
-        div_series = decompose_games_to_series(sol['g_div'], allow_uneven=allow_u)
-        sub_series = decompose_games_to_series(sol['g_sub'], allow_uneven=allow_u) if s_opp > 0 else []
-        inter_series = decompose_games_to_series(sol['g_inter'], allow_uneven=allow_u) if i_opp > 0 else []
+        div_series = decompose_games_to_series(sol['g_div'])
+        sub_series = decompose_games_to_series(sol['g_sub']) if s_opp > 0 else []
+        inter_series = decompose_games_to_series(sol['g_inter']) if i_opp > 0 else []
 
         div_str = f"{sol['g_div']}g ({sol['div_total']}g) [{len(div_series)} ser]"
         sub_str = f"{sol['g_sub']}g ({sol['sub_total']}g) [{len(sub_series)} ser]" if s_opp > 0 else "N/A"
@@ -241,10 +177,9 @@ def build_dynamic_schedule(
 
     total_teams = team_id - 1
 
-    allow_u = chosen_sol.get("allow_uneven", False)
-    div_series_lengths = decompose_games_to_series(chosen_sol["g_div"], allow_uneven=allow_u)
-    sub_series_lengths = decompose_games_to_series(chosen_sol["g_sub"], allow_uneven=allow_u) if chosen_sol["g_sub"] > 0 else []
-    inter_series_lengths = decompose_games_to_series(chosen_sol["g_inter"], allow_uneven=allow_u) if chosen_sol["g_inter"] > 0 else []
+    div_series_lengths = decompose_games_to_series(chosen_sol["g_div"])
+    sub_series_lengths = decompose_games_to_series(chosen_sol["g_sub"]) if chosen_sol["g_sub"] > 0 else []
+    inter_series_lengths = decompose_games_to_series(chosen_sol["g_inter"]) if chosen_sol["g_inter"] > 0 else []
 
     div_windows, sub_windows, inter_windows = [], [], []
 
@@ -257,8 +192,8 @@ def build_dynamic_schedule(
         num_div_rounds = len(next(iter(div_rounds_map.values())))
 
         for cycle_idx, s_len in enumerate(div_series_lengths):
+            swap = cycle_idx % 2 == 1
             for r_idx in range(num_div_rounds):
-                swap = (cycle_idx + r_idx) % 2 == 1
                 window = []
                 for (sl_id, div_id), rounds in div_rounds_map.items():
                     for t1, t2 in rounds[r_idx]:
@@ -266,6 +201,7 @@ def build_dynamic_schedule(
                             "home": t2 if swap else t1,
                             "away": t1 if swap else t2,
                             "length": s_len,
+                            "split_venue": len(div_series_lengths) % 2 == 1 and cycle_idx == 0,
                         })
                 div_windows.append(window)
 
@@ -274,10 +210,10 @@ def build_dynamic_schedule(
         div_pairs = [(div_keys[i], div_keys[j]) for i in range(len(div_keys)) for j in range(i + 1, len(div_keys))]
 
         for cycle_idx, s_len in enumerate(sub_series_lengths):
+            swap = cycle_idx % 2 == 1
             for d1_k, d2_k in div_pairs:
                 sample_bipartite = generate_bipartite_rounds(structure[1][d1_k], structure[1][d2_k])
                 for r_idx in range(len(sample_bipartite)):
-                    swap = (cycle_idx + r_idx) % 2 == 1
                     window = []
                     for sl in structure.values():
                         cr = generate_bipartite_rounds(sl[d1_k], sl[d2_k])
@@ -286,6 +222,7 @@ def build_dynamic_schedule(
                                 "home": t2 if swap else t1,
                                 "away": t1 if swap else t2,
                                 "length": s_len,
+                                "split_venue": len(sub_series_lengths) % 2 == 1 and cycle_idx == 0,
                             })
                     sub_windows.append(window)
 
@@ -295,30 +232,34 @@ def build_dynamic_schedule(
         cross_rounds = generate_bipartite_rounds(sl1_teams, sl2_teams)
 
         for cycle_idx, s_len in enumerate(inter_series_lengths):
+            swap = cycle_idx % 2 == 1
             for r_idx in range(len(cross_rounds)):
-                swap = (cycle_idx + r_idx) % 2 == 1
                 window = []
                 for t1, t2 in cross_rounds[r_idx]:
                     window.append({
                         "home": t2 if swap else t1,
                         "away": t1 if swap else t2,
                         "length": s_len,
+                        "split_venue": len(inter_series_lengths) % 2 == 1 and cycle_idx == 0,
                     })
                 inter_windows.append(window)
 
     # ---------------------------------------------------------
-    # Anchor Start and End with Divisional Matchups
+    # NEW LOGIC: Anchor Start and End with Divisional Matchups
     # and Proportionally Distribute Remaining Series
     # ---------------------------------------------------------
     windows = []
     
+    # Extract the first and last divisional windows to anchor the season
     start_window = div_windows.pop(0) if div_windows else None
     end_window = div_windows.pop(-1) if div_windows else None
     
+    # Proportionally space the remaining middle series to prevent clustering
     spread = []
     
     if div_windows:
         for i, w in enumerate(div_windows):
+            # Calculate a relative float position between 0.0 and 1.0
             spread.append(((i + 0.5) / len(div_windows), 0, w))
             
     if sub_windows:
@@ -329,10 +270,13 @@ def build_dynamic_schedule(
         for i, w in enumerate(inter_windows):
             spread.append(((i + 0.5) / len(inter_windows), 2, w))
             
+    # Sort by relative position (and then by source type to break ties consistently)
     spread.sort(key=lambda x: (x[0], x[1]))
     
+    # Extract just the window data now that it is evenly sorted
     middle_windows = [item[2] for item in spread]
                 
+    # Reassemble the season with the divisional anchors
     if start_window:
         windows.append(start_window)
         
@@ -341,190 +285,951 @@ def build_dynamic_schedule(
     if end_window:
         windows.append(end_window)
 
+    def covers_all_teams(window):
+        return len({
+            team
+            for series in window
+            for team in (series["home"], series["away"])
+        }) == total_teams
+
+    if windows:
+        first_full_index = next(
+            (index for index, window in enumerate(windows) if covers_all_teams(window)),
+            None,
+        )
+        if first_full_index is not None and first_full_index != 0:
+            windows[0], windows[first_full_index] = windows[first_full_index], windows[0]
+
+        last_full_index = next(
+            (
+                index
+                for index in range(len(windows) - 1, 0, -1)
+                if covers_all_teams(windows[index])
+            ),
+            None,
+        )
+        if last_full_index is not None and last_full_index != len(windows) - 1:
+            windows[-1], windows[last_full_index] = windows[last_full_index], windows[-1]
+
     return windows, total_teams
 
 
-def expand_to_slotted_games(windows, target_asg_day=0, asg_before=2, asg_after=1, asg_weekday_num=None, start_dow=2):
+def build_team_rest_calendar(
+    total_teams,
+    games_per_team,
+    asg_day,
+    asg_before=3,
+    asg_after=3,
+    season_length=200,
+    time_limit_seconds=10,
+    random_seed=0,
+):
+    """Build team-specific rest calendars before assigning individual games."""
+    break_start = asg_day - asg_before if asg_day else None
+    break_end = asg_day + asg_after if asg_day else None
+    model = cp_model.CpModel()
+    plays = {
+        (team, day): model.NewBoolVar(f"rest_team_{team}_plays_{day}")
+        for team in range(1, total_teams + 1)
+        for day in range(1, season_length + 1)
+    }
+    for team in range(1, total_teams + 1):
+        model.Add(sum(plays[team, day] for day in range(1, season_length + 1)) == games_per_team)
+        model.Add(plays[team, 1] == 1)
+        model.Add(plays[team, season_length] == 1)
+        for day in range(break_start, break_end + 1) if break_start else []:
+            model.Add(plays[team, day] == 0)
+        if break_start:
+            model.Add(plays[team, break_start - 1] == 1)
+            model.Add(plays[team, break_end + 1] == 1)
+        for start in range(1, season_length - 5):
+            window_days = range(start, start + 7)
+            playable_window_days = [
+                day
+                for day in window_days
+                if not (break_start and break_start <= day <= break_end)
+            ]
+            model.Add(sum(plays[team, day] for day in playable_window_days) >= len(playable_window_days) - 1)
+
+    for day in range(1, season_length + 1):
+        if break_start and break_start <= day <= break_end:
+            continue
+        model.Add(sum(plays[team, day] for team in range(1, total_teams + 1)) >= 1)
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = time_limit_seconds
+    solver.parameters.num_search_workers = 8
+    solver.parameters.random_seed = random_seed
+    status = solver.Solve(model)
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        raise RuntimeError(
+            f"Unable to build team rest calendars (solver status: {solver.StatusName(status)})."
+        )
+    return {
+        team: {day for day in range(1, season_length + 1) if not solver.Value(plays[team, day])}
+        for team in range(1, total_teams + 1)
+    }
+
+
+def assign_games_with_rest_calendar(
+    windows,
+    total_teams,
+    rest_days_by_team,
+    season_length,
+    asg_day=0,
+    asg_before=3,
+    asg_after=3,
+    retry_count=100,
+):
+    """Assign matchup games to team rest calendars using bounded matching retries."""
+    break_start = asg_day - asg_before if asg_day else None
+    break_end = asg_day + asg_after if asg_day else None
+    pair_games = defaultdict(list)
+    for window in windows:
+        for series in window:
+            key = tuple(sorted((series["home"], series["away"])))
+            length = series["length"]
+            for i in range(length):
+                pair_games[key].append({
+                    "home": series["home"],
+                    "away": series["away"],
+                    # Last game of a series is the getaway-day game.
+                    "time": "1305" if i == length - 1 else "1905",
+                })
+
+    for seed in range(retry_count):
+        rng = random.Random(seed)
+        remaining = {key: list(games) for key, games in pair_games.items()}
+        assigned = []
+        day = 1
+        while day <= season_length:
+            if break_start and break_start <= day <= break_end:
+                day += 1
+                continue
+            active = [
+                team
+                for team in range(1, total_teams + 1)
+                if day not in rest_days_by_team[team]
+            ]
+            graph = nx.Graph()
+            graph.add_nodes_from(active)
+            future_days = {
+                team: {
+                    future_day
+                    for future_day in range(day, season_length + 1)
+                    if not (
+                        break_start
+                        and break_start <= future_day <= break_end
+                    )
+                    and future_day not in rest_days_by_team[team]
+                }
+                for team in active
+            }
+            for pair, games in remaining.items():
+                if games and pair[0] in active and pair[1] in active:
+                    common_days = len(future_days[pair[0]] & future_days[pair[1]])
+                    weight = 100000 // max(1, common_days) + len(games) * 10 + rng.random()
+                    graph.add_edge(*pair, weight=weight)
+            for team_a, team_b in nx.max_weight_matching(graph, maxcardinality=True, weight="weight"):
+                pair = tuple(sorted((team_a, team_b)))
+                assigned.append({**remaining[pair].pop(), "day": day})
+            day += 1
+        if not any(remaining.values()):
+            return sorted(assigned, key=lambda game: (game["day"], game["home"])), asg_day
+
+        tail_start = max(1, season_length - 20)
+        tail_games = [game for game in assigned if game["day"] >= tail_start]
+        assigned = [game for game in assigned if game["day"] < tail_start]
+        for game in tail_games:
+            remaining.setdefault(
+                tuple(sorted((game["home"], game["away"]))), []
+            ).append({"home": game["home"], "away": game["away"]})
+        for day in range(tail_start, season_length + 1):
+            if break_start and break_start <= day <= break_end:
+                continue
+            active = [
+                team
+                for team in range(1, total_teams + 1)
+                if day not in rest_days_by_team[team]
+            ]
+            graph = nx.Graph()
+            graph.add_nodes_from(active)
+            for pair, games in remaining.items():
+                if games and pair[0] in active and pair[1] in active:
+                    graph.add_edge(*pair, weight=len(games) * 1000 + rng.random())
+            for team_a, team_b in nx.max_weight_matching(graph, maxcardinality=True, weight="weight"):
+                pair = tuple(sorted((team_a, team_b)))
+                assigned.append({**remaining[pair].pop(), "day": day})
+        if not any(remaining.values()):
+            return sorted(assigned, key=lambda game: (game["day"], game["home"])), asg_day
+
+    raise RuntimeError("Unable to assign all matchup games to the team rest calendars.")
+
+
+def assign_games_with_edge_coloring(
+    windows,
+    total_teams,
+    rest_days_by_team,
+    season_length,
+    asg_day=0,
+    asg_before=3,
+    asg_after=3,
+    node_limit=100000,
+):
+    """Assign matchup edges to playable days with bounded backtracking."""
+    break_start = asg_day - asg_before if asg_day else None
+    break_end = asg_day + asg_after if asg_day else None
+    edges = []
+    for window in windows:
+        for series in window:
+            pair = tuple(sorted((series["home"], series["away"])))
+            edges.extend([pair] * series["length"])
+
+    edge_days = []
+    for home, away in edges:
+        edge_days.append([
+            day
+            for day in range(1, season_length + 1)
+            if not (break_start and break_start <= day <= break_end)
+            and day not in rest_days_by_team[home]
+            and day not in rest_days_by_team[away]
+        ])
+    order = sorted(range(len(edges)), key=lambda index: len(edge_days[index]))
+    assigned = {}
+    used_by_day = defaultdict(set)
+    nodes = 0
+
+    def search(position):
+        nonlocal nodes
+        nodes += 1
+        if nodes > node_limit:
+            return False
+        if position == len(order):
+            return True
+        edge_index = order[position]
+        home, away = edges[edge_index]
+        candidate_days = sorted(
+            edge_days[edge_index],
+            key=lambda day: len(used_by_day[day]),
+        )
+        for day in candidate_days:
+            if home in used_by_day[day] or away in used_by_day[day]:
+                continue
+            assigned[edge_index] = day
+            used_by_day[day].update((home, away))
+            if search(position + 1):
+                return True
+            used_by_day[day].difference_update((home, away))
+            del assigned[edge_index]
+        return False
+
+    previous_recursion_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(previous_recursion_limit, len(edges) + 100))
+    try:
+        solved = search(0)
+    finally:
+        sys.setrecursionlimit(previous_recursion_limit)
+    if not solved:
+        raise RuntimeError(f"Unable to edge-color matchup games within {node_limit} search nodes.")
+    result = [
+        {"home": edges[index][0], "away": edges[index][1], "day": assigned[index]}
+        for index in range(len(edges))
+    ]
+    return sorted(result, key=lambda game: (game["day"], game["home"])), asg_day
+
+
+def expand_to_game_level_games(
+    windows,
+    total_teams,
+    target_asg_day=0,
+    asg_before=3,
+    asg_after=3,
+    asg_weekday_num=None,
+    start_dow=2,
+    time_limit_seconds=60,
+    enforce_game_streak=True,
+    enforce_venue_streak=True,
+    enforce_seven_day=True,
+    enforce_asg_boundaries=True,
+    enforce_league_activity=True,
+    rest_days_by_team=None,
+    season_length=200,
+    max_off_days_in_window=1,
+    schedule_allstar_game=False,
+):
+    """Place individual games with CP-SAT for larger league configurations."""
+    team_ids = list(range(1, total_teams + 1))
+    total_game_days = sum(max(series["length"] for series in window) for window in windows if window)
+    if target_asg_day == 0 and (asg_weekday_num is not None or schedule_allstar_game):
+        baseline_games, _ = expand_to_slotted_games(
+            windows,
+            start_dow=start_dow,
+            avoid_league_off_days=True,
+            league_off_day_interval=5,
+            max_off_days_in_window=max_off_days_in_window,
+            schedule_allstar_game=False,
+        )
+        target_asg_day = max(game["day"] for game in baseline_games) // 2 + 2
+    actual_asg_day = target_asg_day
+    if asg_weekday_num is not None:
+        diff = asg_weekday_num - get_weekday(target_asg_day, start_dow)
+        if diff > 3:
+            diff -= 7
+        elif diff < -3:
+            diff += 7
+        actual_asg_day += diff
+
+    break_start = actual_asg_day - asg_before if actual_asg_day else None
+    break_end = actual_asg_day + asg_after if actual_asg_day else None
+    games_per_team = sum(
+        series["length"]
+        for window in windows
+        for series in window
+    ) * 2 // total_teams
+    # series_id is unique per individual series occurrence (not per window, which can
+    # contain many simultaneous series) so consecutive-day constraints can be applied below.
+    games = []
+    series_id = 0
+    for window in windows:
+        for series in window:
+            for offset in range(series["length"]):
+                games.append({
+                    "home": series["home"],
+                    "away": series["away"],
+                    "series_id": series_id,
+                    "series_offset": offset,
+                    "split_venue": series.get("split_venue", False),
+                })
+            series_id += 1
+
+    allowed_days = [
+        day
+        for day in range(1, season_length + 1)
+        if break_start is None or not break_start <= day <= break_end
+    ]
+    # Single greedy pass reused for both the CP-SAT domain seeding and solver hints
+    # (this used to run twice, doubling model-build time for no benefit).
+    seed_days = {}
+    hint_by_pair = {}
+    try:
+        seed_games, _ = expand_to_slotted_games(
+            windows,
+            target_asg_day=target_asg_day,
+            asg_before=asg_before,
+            asg_after=asg_after,
+            asg_weekday_num=asg_weekday_num,
+            start_dow=start_dow,
+            avoid_league_off_days=False,
+        )
+        seed_by_pair = {}
+        for seed_game in seed_games:
+            pair = (seed_game["home"], seed_game["away"])
+            seed_by_pair.setdefault(pair, []).append(seed_game["day"])
+            hint_by_pair.setdefault(pair, []).append(seed_game["day"])
+        seed_positions = {pair: 0 for pair in seed_by_pair}
+        for index, game in enumerate(games):
+            pair = (game["home"], game["away"])
+            position = seed_positions.get(pair, 0)
+            if position < len(seed_by_pair.get(pair, [])):
+                seed_days[index] = seed_by_pair[pair][position]
+                seed_positions[pair] = position + 1
+    except RuntimeError:
+        seed_days = {}
+
+    model = cp_model.CpModel()
+    game_allowed_days = {
+        index: [
+            day
+            for day in allowed_days
+            if max_off_days_in_window <= 1
+            or index not in seed_days
+            or abs(day - seed_days[index]) <= 14
+        ]
+        for index, game in enumerate(games)
+    }
+    day_vars = [
+        model.NewIntVarFromDomain(
+            cp_model.Domain.FromValues(game_allowed_days[index]),
+            f"game_day_{index}",
+        )
+        for index in range(len(games))
+    ]
+    day_lits = {}
+    team_game_indexes = {team: [] for team in range(1, total_teams + 1)}
+    pair_game_indexes = {}
+    for index, game in enumerate(games):
+        team_game_indexes[game["home"]].append(index)
+        team_game_indexes[game["away"]].append(index)
+        pair_game_indexes.setdefault((game["home"], game["away"]), []).append(index)
+        for day in game_allowed_days[index]:
+            literal = model.NewBoolVar(f"game_{index}_on_{day}")
+            model.Add(day_vars[index] == day).OnlyEnforceIf(literal)
+            model.Add(day_vars[index] != day).OnlyEnforceIf(literal.Not())
+            day_lits[index, day] = literal
+
+    for team, indexes in team_game_indexes.items():
+        team_intervals = [
+            model.NewIntervalVar(
+                day_vars[index],
+                1,
+                day_vars[index] + 1,
+                f"team_{team}_game_{index}",
+            )
+            for index in indexes
+        ]
+        model.AddNoOverlap(team_intervals)
+
+    # Force each series' games onto consecutive calendar days (2/3/4-game series),
+    # instead of letting the solver scatter same-matchup games independently.
+    series_game_indexes = defaultdict(dict)
+    for index, game in enumerate(games):
+        series_game_indexes[game["series_id"]][game["series_offset"]] = index
+    for offsets in series_game_indexes.values():
+        base_index = offsets[0]
+        for offset, index in offsets.items():
+            if offset == 0:
+                continue
+            model.Add(day_vars[index] == day_vars[base_index] + offset)
+
+    try:
+        pair_positions = {pair: 0 for pair in pair_game_indexes}
+        for index, game in enumerate(games):
+            pair = (game["home"], game["away"])
+            position = pair_positions[pair]
+            pair_positions[pair] += 1
+            hinted_days = hint_by_pair.get(pair, [])
+            if position < len(hinted_days):
+                hint_day = hinted_days[position]
+                if rest_days_by_team is not None:
+                    compatible_days = [
+                        day
+                        for day in hinted_days[position:]
+                        if all(day not in rest_days_by_team[team] for team in (game["home"], game["away"]))
+                    ]
+                    if compatible_days:
+                        hint_day = compatible_days[0]
+                if hint_day in allowed_days:
+                    model.AddHint(day_vars[index], hint_day)
+    except RuntimeError:
+        pass
+
+    for indexes in pair_game_indexes.values():
+        for day in allowed_days:
+            model.Add(
+                sum(
+                    day_lits[index, day]
+                    for index in indexes
+                    if (index, day) in day_lits
+                )
+                <= 1
+            )
+
+    plays = {}
+    home_plays = {}
+    away_plays = {}
+    for team, indexes in team_game_indexes.items():
+        model.AddAllDifferent([day_vars[index] for index in indexes])
+        for day in range(1, season_length + 1):
+            team_literals = [day_lits[index, day] for index in indexes if (index, day) in day_lits]
+            plays[team, day] = model.NewBoolVar(f"team_{team}_plays_{day}")
+            model.Add(sum(team_literals) <= 1)
+            model.Add(sum(team_literals) == plays[team, day])
+            home_literals = [day_lits[index, day] for index in indexes if games[index]["home"] == team and (index, day) in day_lits]
+            away_literals = [day_lits[index, day] for index in indexes if games[index]["away"] == team and (index, day) in day_lits]
+            home_plays[team, day] = model.NewBoolVar(f"team_{team}_home_{day}")
+            away_plays[team, day] = model.NewBoolVar(f"team_{team}_away_{day}")
+            model.Add(sum(home_literals) == home_plays[team, day])
+            model.Add(sum(away_literals) == away_plays[team, day])
+            model.Add(home_plays[team, day] + away_plays[team, day] == plays[team, day])
+
+        model.Add(plays[team, 1] == 1)
+        model.Add(plays[team, season_length] == 1)
+        if break_start and enforce_asg_boundaries:
+            model.Add(plays[team, break_start - 1] == 1)
+            model.Add(plays[team, break_end + 1] == 1)
+        off_day_window = 3 if max_off_days_in_window <= 1 else 7
+        required_games = 1 if off_day_window == 3 else off_day_window - max_off_days_in_window
+        for start in range(1, season_length - off_day_window + 1) if enforce_seven_day else []:
+            window_days = range(start, start + off_day_window)
+            playable_window_days = [
+                day
+                for day in window_days
+                if not (break_start and break_start <= day <= break_end)
+            ]
+            model.Add(
+                sum(plays[team, day] for day in playable_window_days)
+                >= min(required_games, len(playable_window_days))
+            )
+        for start in range(1, season_length - 20) if enforce_game_streak else []:
+            if break_start and start <= break_end and start + 20 >= break_start:
+                continue
+            model.Add(sum(plays[team, day] for day in range(start, start + 21)) >= 20)
+        for start in range(1, season_length - 12) if enforce_venue_streak else []:
+            if break_start and start <= break_end and start + 12 >= break_start:
+                continue
+            model.Add(sum(home_plays[team, day] for day in range(start, start + 13)) <= 12)
+            model.Add(sum(away_plays[team, day] for day in range(start, start + 13)) <= 12)
+
+    for day in allowed_days if enforce_league_activity else []:
+        model.Add(sum(plays[team, day] for team in team_ids) >= 1)
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = time_limit_seconds
+    solver.parameters.num_search_workers = 8
+    solver.parameters.repair_hint = True
+    solver.parameters.hint_conflict_limit = 1000
+    solver.parameters.use_lns = True
+    solver.parameters.cp_model_presolve = True
+    solver.parameters.symmetry_level = 2
+    solver.parameters.linearization_level = 0
+    solver.parameters.search_branching = cp_model.PORTFOLIO_SEARCH
+    status = solver.Solve(model)
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        raise RuntimeError(
+            "Unable to produce a game-level schedule satisfying all scheduling rules "
+            f"(solver status: {solver.StatusName(status)})."
+        )
+
+    for index, game in enumerate(games):
+        game["day"] = solver.Value(day_vars[index])
+    last_by_series = {}
+    for game in games:
+        last_by_series[game["series_id"]] = max(last_by_series.get(game["series_id"], 0), game["day"])
+    for game in games:
+        if game["split_venue"] and game["series_offset"] % 2 == 1:
+            game["home"], game["away"] = game["away"], game["home"]
+        game["time"] = "1305" if game["day"] == last_by_series[game["series_id"]] else "1905"
+        game.pop("series_id", None)
+        game.pop("series_offset", None)
+        game.pop("split_venue", None)
+    return sorted(games, key=lambda game: (game["day"], game["home"])), actual_asg_day
+
+
+def expand_to_slotted_games(
+    windows,
+    target_asg_day=0,
+    asg_before=2,
+    asg_after=1,
+    asg_weekday_num=None,
+    start_dow=2,
+    max_consecutive_games=20,
+    max_consecutive_home_or_road=12,
+    avoid_league_off_days=False,
+    league_off_day_interval=None,
+    max_off_days_in_window=5,
+    schedule_allstar_game=False,
+):
     slotted_games = []
     actual_asg_day = 0
-    MIN_SPACING = 7 
-    
+
+    team_ids = sorted({
+        team
+        for window in windows
+        for series in window
+        for team in (series["home"], series["away"])
+    })
+    if target_asg_day == 0 and (asg_weekday_num is not None or schedule_allstar_game):
+        baseline_games, _ = expand_to_slotted_games(
+            windows,
+            start_dow=start_dow,
+            avoid_league_off_days=avoid_league_off_days,
+            league_off_day_interval=5,
+            max_off_days_in_window=max_off_days_in_window,
+            schedule_allstar_game=False,
+        )
+        target_asg_day = max(game["day"] for game in baseline_games) // 2 + 2
     if target_asg_day > 0 or asg_weekday_num is not None:
-        if target_asg_day == 0:
-            total_game_days = sum(max(s["length"] for s in w) if w else 3 for w in windows)
-            total_stagger_days = total_game_days // MIN_SPACING 
-            target_asg_day = (total_game_days + total_stagger_days) // 2
-            
         actual_asg_day = target_asg_day
         if asg_weekday_num is not None:
             diff = asg_weekday_num - get_weekday(target_asg_day, start_dow)
-            if diff > 3: diff -= 7
-            elif diff < -3: diff += 7
+            if diff > 3:
+                diff -= 7
+            elif diff < -3:
+                diff += 7
             actual_asg_day += diff
-            
-        break_start = actual_asg_day - asg_before
-        target_first_half_end = break_start - 1
-        
-        w_idx = 0
-        game_days = 0
-        while w_idx < len(windows):
-            ml = max(s["length"] for s in windows[w_idx]) if windows[w_idx] else 3
-            projected_off_days = game_days // MIN_SPACING 
-            if game_days + ml + projected_off_days > target_first_half_end:
-                break
-            game_days += ml
-            w_idx += 1
-            
-        W = w_idx
-        off_days_needed = target_first_half_end - game_days
-        first_half_off_days = [0] * W
-        
-        if W > 1 and off_days_needed > 0:
-            avail_slots = list(range(1, W - 1))
-            if off_days_needed > len(avail_slots):
-                avail_slots = list(range(1, W))
-            
-            n_avail = len(avail_slots)
-            num_to_place = min(off_days_needed, n_avail)
-            
-            selected_indices = set()
-            for k in range(num_to_place):
-                slot_idx = int(round((k + 0.5) * n_avail / num_to_place - 0.5))
-                slot_idx = max(0, min(n_avail - 1, slot_idx))
-                while slot_idx in selected_indices and slot_idx < n_avail - 1:
-                    slot_idx += 1
-                while slot_idx in selected_indices and slot_idx > 0:
-                    slot_idx -= 1
-                selected_indices.add(slot_idx)
-                first_half_off_days[avail_slots[slot_idx]] = 1
-    else:
-        W = len(windows)
-        first_half_off_days = [0] * W
-        days_since_last = 0
-        for i in range(1, W - 1):
-            ml = max(s["length"] for s in windows[i-1]) if windows[i-1] else 3
-            days_since_last += ml
-            if days_since_last >= MIN_SPACING:
-                first_half_off_days[i] = 1
-                days_since_last -= MIN_SPACING
-        
-    day = 1 
-    
-    # 1. Schedule First Half 
-    for i in range(W):
-        series_list = windows[i]
-        max_len = max(s["length"] for s in series_list) if series_list else 3
-        stagger = first_half_off_days[i]
-        
-        half_idx = len(series_list) // 2
-        
-        for s_idx, series in enumerate(series_list):
+
+    break_start = actual_asg_day - asg_before if actual_asg_day > 0 else None
+    break_end = actual_asg_day + asg_after if actual_asg_day > 0 else None
+    rounds = [list(window) for window in windows if window]
+    all_series_lengths = {
+        series["length"]
+        for window in rounds
+        for series in window
+    }
+    compatible_series_schedule = (
+        bool(all_series_lengths)
+        and max(all_series_lengths) - min(all_series_lengths) <= 1
+    )
+    mixed_compatible_schedule = compatible_series_schedule and len(all_series_lengths) > 1
+    native_rounds_are_valid = all(
+        (
+            len({team for series in round_series for team in (series["home"], series["away"])})
+            == len(team_ids)
+            if compatible_series_schedule
+            else len({team for series in round_series for team in (series["home"], series["away"])})
+            == len(round_series) * 2
+        )
+        and len({series["length"] for series in round_series}) == 1
+        for round_series in rounds
+    )
+
+    if not native_rounds_are_valid:
+        series_by_pair = {}
+        for series in (series for window in windows for series in window):
+            key = tuple(sorted((series["home"], series["away"])))
+            series_by_pair.setdefault(key, []).append(series)
+
+        rounds = None
+        if compatible_series_schedule:
+            best_rounds = None
+            best_score = None
+            for seed in range(10):
+                remaining_by_pair = {key: list(series_list) for key, series_list in series_by_pair.items()}
+                rng = random.Random(seed)
+                candidate_rounds = []
+                while any(remaining_by_pair.values()):
+                    graph = nx.Graph()
+                    graph.add_nodes_from(team_ids)
+                    for key, series_list in remaining_by_pair.items():
+                        if series_list:
+                            graph.add_edge(*key, weight=len(series_list) * 1000 + rng.random())
+                    matching = nx.max_weight_matching(graph, maxcardinality=True, weight="weight")
+                    if len(matching) != len(team_ids) // 2:
+                        break
+
+                    round_series = []
+                    for team_a, team_b in matching:
+                        key = tuple(sorted((team_a, team_b)))
+                        round_series.append(remaining_by_pair[key].pop())
+                    candidate_rounds.append(round_series)
+                else:
+                    team_rounds = {
+                        team: [
+                            index
+                            for index, round_series in enumerate(candidate_rounds)
+                            if any(team in (series["home"], series["away"]) for series in round_series)
+                        ]
+                        for team in team_ids
+                    }
+                    score = max(
+                        max(current - previous - 1 for previous, current in zip(indices, indices[1:]))
+                        for indices in team_rounds.values()
+                    )
+                    if best_score is None or score < best_score:
+                        best_score = score
+                        best_rounds = candidate_rounds
+            rounds = best_rounds
+        else:
+            for seed in range(20):
+                remaining_by_pair = {key: list(series_list) for key, series_list in series_by_pair.items()}
+                rng = random.Random(seed)
+                candidate_rounds = []
+                while any(remaining_by_pair.values()):
+                    graph = nx.Graph()
+                    graph.add_nodes_from(team_ids)
+                    for key, series_list in remaining_by_pair.items():
+                        if series_list:
+                            graph.add_edge(*key, weight=len(series_list) * 1000 + rng.random())
+                    matching = nx.max_weight_matching(graph, maxcardinality=True, weight="weight")
+                    if len(matching) != len(team_ids) // 2:
+                        break
+
+                    round_series = []
+                    for team_a, team_b in matching:
+                        key = tuple(sorted((team_a, team_b)))
+                        round_series.append(remaining_by_pair[key].pop())
+                    candidate_rounds.append(round_series)
+                else:
+                    rounds = candidate_rounds
+                    break
+
+        if rounds is None:
+            raise RuntimeError("Unable to form conflict-free rounds from the remaining series.")
+
+    next_start_day = 1
+    consecutive_game_days = 0
+    streak_break_interval = min(max_consecutive_games, max_consecutive_home_or_road)
+    aligned_asg_prebreak = False
+    round_index = 0
+    previous_round_length = None
+    last_game_day = {team: None for team in team_ids}
+    team_streak = {team: 0 for team in team_ids}
+    prebreak_shifted = False
+    scheduled_days = {team: set() for team in team_ids}
+    last_league_off_day = None
+
+    def has_excess_off_days(days):
+        if not days:
+            return False
+        if max_off_days_in_window <= 1:
+            return any(
+                day not in days and next_day not in days
+                for day, next_day in zip(range(1, max(days)), range(2, max(days) + 1))
+            )
+        for start_day in range(1, max(days) - 5):
+            off_days = sum(day not in days for day in range(start_day, start_day + 7))
+            if off_days > max_off_days_in_window:
+                return True
+        return False
+
+    while round_index < len(rounds):
+        round_series = rounds[round_index]
+        round_length = max(series["length"] for series in round_series)
+        if any(round_length - series["length"] > 1 for series in round_series):
+            raise RuntimeError("A round would create more than one consecutive off-day.")
+
+        stagger_round = (
+            avoid_league_off_days
+            and not mixed_compatible_schedule
+            and round_index > 0
+            and round_index < len(rounds) - 1
+            and (
+                (
+                    league_off_day_interval is not None
+                    and consecutive_game_days + round_length >= league_off_day_interval
+                )
+                or (
+                    league_off_day_interval is None
+                    and compatible_series_schedule
+                    and round_index % 2 == 0
+                )
+                or (
+                    league_off_day_interval is None
+                    and not compatible_series_schedule
+                    and consecutive_game_days + round_length > streak_break_interval
+                )
+            )
+        )
+        if break_end is not None and next_start_day == break_end + 1:
+            stagger_round = False
+        if previous_round_length is not None and previous_round_length != round_length:
+            stagger_round = False
+
+        staggered_series = set()
+        if (
+            break_start is not None
+            and break_start - 12 <= next_start_day < break_start
+        ):
+            stagger_round = False
+
+        if not avoid_league_off_days and consecutive_game_days + round_length > streak_break_interval:
+            next_start_day += 1
+            consecutive_game_days = 0
+
+        if (
+            not aligned_asg_prebreak
+            and
+            break_start is not None
+            and next_start_day < break_start
+            and next_start_day + round_length > break_start - 1
+        ):
+            pre_break_length = break_start - next_start_day
+            replacement_candidates = [
+                index
+                for index in range(round_index + 1, len(rounds))
+                if max(series["length"] for series in rounds[index]) <= pre_break_length
+            ]
+            replacement_index = max(
+                replacement_candidates,
+                key=lambda index: max(series["length"] for series in rounds[index]),
+                default=None,
+            )
+            if replacement_index is not None:
+                rounds[round_index], rounds[replacement_index] = rounds[replacement_index], rounds[round_index]
+                chosen_length = max(series["length"] for series in rounds[round_index])
+                # Absorb any leftover gap before this round instead of leaving it
+                # adjacent to the break, which would violate the no-off-day rule.
+                next_start_day += pre_break_length - chosen_length
+                aligned_asg_prebreak = True
+                continue
+
+        if (
+            break_start is not None
+            and break_end is not None
+            and next_start_day <= break_end
+            and next_start_day + round_length - 1 >= break_start
+        ):
+            next_start_day = break_end + 1
+            consecutive_game_days = 0
+            stagger_round = False
+            staggered_series = set()
+
+        # Force a stagger for any series whose team would otherwise exceed the
+        # hard consecutive-games cap (independent of the league off-day heuristic above).
+        # Skip the first/last round so the no-off-day-at-season-start/end rule stays intact.
+        forced_stagger_indices = set()
+        if 0 < round_index < len(rounds) - 1:
+            for series_index, series in enumerate(round_series):
+                for team in (series["home"], series["away"]):
+                    contiguous = last_game_day[team] is not None and last_game_day[team] + 1 == next_start_day
+                    prospective_streak = (
+                        team_streak[team] + series["length"] if contiguous else series["length"]
+                    )
+                    if prospective_streak > max_consecutive_games:
+                        forced_stagger_indices.add(series_index)
+                        break
+        if forced_stagger_indices:
+            stagger_round = True
+
+        stagger_late_first = round_index % 2 == 0
+        if stagger_round:
+            half_index = len(round_series) // 2
+            selected_orientation = None
+            for late_first in (stagger_late_first, not stagger_late_first):
+                proposed_days = {team: set(days) for team, days in scheduled_days.items()}
+                valid_orientation = True
+                for series_index, series in enumerate(round_series):
+                    stagger = (series_index >= half_index) ^ late_first
+                    series_start_day = next_start_day + int(stagger)
+                    series_days = range(series_start_day, series_start_day + series["length"])
+                    for team in (series["home"], series["away"]):
+                        proposed_days[team].update(series_days)
+                if any(has_excess_off_days(days) for days in proposed_days.values()):
+                    valid_orientation = False
+                if valid_orientation:
+                    selected_orientation = late_first
+                    staggered_series = {
+                        index
+                        for index in range(len(round_series))
+                        if (index >= half_index) ^ late_first
+                    }
+                    break
+            if selected_orientation is None:
+                proposed_days = {team: set(days) for team, days in scheduled_days.items()}
+                for series_index, series in enumerate(round_series):
+                    proposed_days[series["home"]].update(
+                        range(next_start_day, next_start_day + series["length"])
+                    )
+                    proposed_days[series["away"]].update(
+                        range(next_start_day, next_start_day + series["length"])
+                    )
+                for series_index, series in enumerate(round_series):
+                    candidate_days = {team: set(days) for team, days in proposed_days.items()}
+                    shifted_days = range(
+                        next_start_day + 1,
+                        next_start_day + series["length"] + 1,
+                    )
+                    candidate_days[series["home"]].difference_update(
+                        range(next_start_day, next_start_day + series["length"])
+                    )
+                    candidate_days[series["away"]].difference_update(
+                        range(next_start_day, next_start_day + series["length"])
+                    )
+                    candidate_days[series["home"]].update(shifted_days)
+                    candidate_days[series["away"]].update(shifted_days)
+                    if (
+                        not any(has_excess_off_days(days) for days in candidate_days.values())
+                        or (
+                            break_end is not None
+                            and next_start_day > break_end
+                            and not staggered_series
+                        )
+                    ):
+                        proposed_days = candidate_days
+                        staggered_series.add(series_index)
+                        if break_end is not None and next_start_day > break_end:
+                            break
+                stagger_round = bool(staggered_series)
+            else:
+                stagger_late_first = selected_orientation
+
+        if forced_stagger_indices:
+            staggered_series = staggered_series | forced_stagger_indices
+            stagger_round = True
+
+        half_index = len(round_series) // 2
+        for series_index, series in enumerate(round_series):
             h, a, length = series["home"], series["away"], series["length"]
-            
-            in_second_half = (s_idx >= half_idx)
-            shift = stagger if (in_second_half ^ (i % 2 == 0)) else 0
-            
-            start_day = day + shift
-            
-            for d in range(length):
+            stagger = stagger_round and (
+                series_index in staggered_series
+                or ((not staggered_series) and ((series_index >= half_index) ^ stagger_late_first))
+            )
+            series_start_day = next_start_day + int(stagger)
+            for day in range(series_start_day, series_start_day + length):
+                game_home, game_away = h, a
+                if series.get("split_venue") and (day - series_start_day) % 2 == 1:
+                    game_home, game_away = a, h
                 slotted_games.append({
-                    "day": start_day + d,
-                    "time": "1905" if d < length - 1 else "1305",
-                    "home": h,
-                    "away": a,
+                    "day": day,
+                    "time": "1905" if day < series_start_day + length - 1 else "1305",
+                    "home": game_home,
+                    "away": game_away,
                 })
-        
-        day += max_len + stagger
-        
-    # 2. Apply Strict ASG Break
-    if actual_asg_day > 0 and W < len(windows):
-        day = actual_asg_day + asg_after + 1
-        
-    # 3. Schedule Second Half
-    if W < len(windows):
-        second_half_lengths = [max(s["length"] for s in windows[w]) if windows[w] else 3 for w in range(W, len(windows))]
-        SH_W = len(second_half_lengths)
-        second_half_off_days = [0] * SH_W
-        
-        if SH_W > 1:
-            allowed_sh_off_days = sum(second_half_lengths) // MIN_SPACING
-            sh_avail_slots = list(range(1, SH_W - 1)) if SH_W > 2 else list(range(1, SH_W))
-            n_sh_avail = len(sh_avail_slots)
-            
-            if n_sh_avail > 0 and allowed_sh_off_days > 0:
-                num_sh_to_place = min(allowed_sh_off_days, n_sh_avail)
-                selected_sh_indices = set()
-                
-                for k in range(num_sh_to_place):
-                    slot_idx = int(round((k + 0.5) * n_sh_avail / num_sh_to_place - 0.5))
-                    slot_idx = max(0, min(n_sh_avail - 1, slot_idx))
-                    while slot_idx in selected_sh_indices and slot_idx < n_sh_avail - 1:
-                        slot_idx += 1
-                    while slot_idx in selected_sh_indices and slot_idx > 0:
-                        slot_idx -= 1
-                    selected_sh_indices.add(slot_idx)
-                    second_half_off_days[sh_avail_slots[slot_idx]] = 1
-                    
-        for idx, i in enumerate(range(W, len(windows))):
-            series_list = windows[i]
-            max_len = second_half_lengths[idx]
-            stagger = second_half_off_days[idx]
-            
-            half_idx = len(series_list) // 2
-            
-            for s_idx, series in enumerate(series_list):
-                h, a, length = series["home"], series["away"], series["length"]
-                
-                in_second_half = (s_idx >= half_idx)
-                shift = stagger if (in_second_half ^ (idx % 2 == 0)) else 0
-                
-                start_day = day + shift
-                
-                for d in range(length):
-                    slotted_games.append({
-                        "day": start_day + d,
-                        "time": "1905" if d < length - 1 else "1305",
-                        "home": h,
-                        "away": a,
-                    })
-            
-            day += max_len + stagger
-            
-    return sorted(slotted_games, key=lambda x: (x["day"], x["home"])), actual_asg_day
+            for team in (h, a):
+                if last_game_day[team] is not None and last_game_day[team] + 1 == series_start_day:
+                    team_streak[team] += length
+                else:
+                    team_streak[team] = length
+            last_game_day[h] = series_start_day + length - 1
+            last_game_day[a] = series_start_day + length - 1
+            scheduled_days[h].update(range(series_start_day, series_start_day + length))
+            scheduled_days[a].update(range(series_start_day, series_start_day + length))
+
+        next_start_day += round_length + int(stagger_round)
+        consecutive_game_days = 0 if stagger_round else consecutive_game_days + round_length
+        if (
+            league_off_day_interval is not None
+            and not stagger_round
+            and not avoid_league_off_days
+            and consecutive_game_days >= league_off_day_interval
+            and (
+                break_start is None
+                or next_start_day < break_start - 7
+                or next_start_day > break_end
+            )
+            and (
+                last_league_off_day is None
+                or next_start_day - last_league_off_day >= 7
+            )
+        ):
+            next_start_day += 1
+            consecutive_game_days = 0
+            last_league_off_day = next_start_day - 1
+        previous_round_length = round_length
+        round_index += 1
+
+    slotted_games.sort(key=lambda x: (x["day"], x["home"]))
+
+    for team in team_ids:
+        team_games = sorted(
+            (game["day"], "H" if game["home"] == team else "A")
+            for game in slotted_games
+            if team in (game["home"], game["away"])
+        )
+        game_streak = home_streak = road_streak = 0
+        previous_day = None
+        for day, venue in team_games:
+            consecutive_day = previous_day is not None and day == previous_day + 1
+            game_streak = game_streak + 1 if consecutive_day else 1
+            home_streak = home_streak + 1 if consecutive_day and venue == "H" else int(venue == "H")
+            road_streak = road_streak + 1 if consecutive_day and venue == "A" else int(venue == "A")
+            if game_streak > max_consecutive_games:
+                raise RuntimeError(f"Team {team} exceeds the consecutive-game limit.")
+            previous_day = day
+
+    return slotted_games, actual_asg_day
 
 
-def generate_preview_data(slotted_games, total_teams):
-    """Generates dictionary grid and metrics for schedule preview."""
+def generate_html_report(slotted_games, total_teams, html_filename, asg_day=0):
+    """Generates a standalone HTML file with a schedule grid and evaluation metrics."""
     if not slotted_games:
-        return {"grid": {}, "metrics": {}}
+        return
 
     max_day = max(g["day"] for g in slotted_games)
     
+    # Initialize data structures
     grid = {t: {d: "" for d in range(1, max_day + 1)} for t in range(1, total_teams + 1)}
     metrics = {t: {"home": 0, "away": 0} for t in range(1, total_teams + 1)}
     
+    # Populate data
     for g in slotted_games:
         day, h, a = g["day"], g["home"], g["away"]
         grid[h][day] = f"vs {a}"
         grid[a][day] = f"@ {h}"
         metrics[h]["home"] += 1
         metrics[a]["away"] += 1
-        
-    return {"grid": grid, "metrics": metrics}
 
-
-def generate_html_report(slotted_games, total_teams, html_filename):
-    """Generates a standalone HTML file with a schedule grid and evaluation metrics."""
-    if not slotted_games:
-        return
-
-    # Fetch grid and metrics using the newly separated function
-    preview = generate_preview_data(slotted_games, total_teams)
-    grid = preview["grid"]
-    metrics = preview["metrics"]
-    
-    max_day = max(g["day"] for g in slotted_games)
-
+    # Build HTML string
     html = [
         "<!DOCTYPE html>",
         "<html><head><title>Schedule Preview</title>",
@@ -541,32 +1246,43 @@ def generate_html_report(slotted_games, total_teams, html_filename):
         ".home { color: #2ca02c; font-weight: bold; }", 
         ".away { color: #d62728; font-weight: bold; }",
         ".legend { font-size: 14px; margin-bottom: 12px; }",
+        ".asg-row td { background-color: #fdf5d3; color: #b45309; font-weight: bold; letter-spacing: 2px; }",
+        ".asg-row th { background-color: #fde047; }",
         "</style></head><body>"
     ]
     
+    # --- Evaluation View ---
     html.append("<h2>Schedule Evaluation</h2>")
     html.append("<div style='max-width: 400px;'><table style='min-width: 100%;'>")
     html.append("<tr><th>Team ID</th><th>Home Games</th><th>Away Games</th><th>Total</th></tr>")
-    
     for t in range(1, total_teams + 1):
         total_g = metrics[t]['home'] + metrics[t]['away']
         html.append(f"<tr><th>T{t}</th><td>{metrics[t]['home']}</td><td>{metrics[t]['away']}</td><td>{total_g}</td></tr>")
     html.append("</table></div><br>")
     
+    # --- Grid View ---
     html.append("<h2>Schedule Grid</h2>")
     
+    # Legend
     html.append("<div class='legend'>")
     html.append("<strong>Legend:</strong> <span class='home'>Green (vs) = Home Game</span> &nbsp;|&nbsp; <span class='away'>Red (@) = Away Game</span>")
     html.append("</div>")
     
     html.append("<div class='table-container'><table>")
     
+    # Header Row (Teams on X-Axis)
     html.append("<tr><th class='sticky-corner'>Day</th>")
     for t in range(1, total_teams + 1):
         html.append(f"<th class='sticky-top'>T{t}</th>")
     html.append("</tr>")
     
+    # Day Rows (Days on Y-Axis)
     for d in range(1, max_day + 1):
+        # NEW: Intercept the loop to draw the ASG Row
+        if asg_day > 0 and d == asg_day:
+            html.append(f"<tr class='asg-row'><th class='sticky-left'>D{d}</th><td colspan='{total_teams}'>⭐ ALL-STAR GAME ⭐</td></tr>")
+            continue
+
         html.append(f"<tr><th class='sticky-left'>D{d}</th>")
         for t in range(1, total_teams + 1):
             cell = grid[t][d]
@@ -581,6 +1297,70 @@ def generate_html_report(slotted_games, total_teams, html_filename):
         f.write("\n".join(html))
 
 
+def generate_preview_data(slotted_games, total_teams):
+    """Generates evaluation metrics and schedule grid data for frontend JSON consumption."""
+    if not slotted_games:
+        return {"grid": {}, "metrics": {}, "max_day": 0, "total_teams": total_teams}
+
+    max_day = max(g["day"] for g in slotted_games)
+    
+    # Initialize data structures
+    grid = {str(t): {str(d): "" for d in range(1, max_day + 1)} for t in range(1, total_teams + 1)}
+    metrics = {str(t): {"home": 0, "away": 0} for t in range(1, total_teams + 1)}
+    
+    # Populate data
+    for g in slotted_games:
+        day, h, a = str(g["day"]), str(g["home"]), str(g["away"])
+        grid[h][day] = f"vs {a}"
+        grid[a][day] = f"@ {h}"
+        metrics[h]["home"] += 1
+        metrics[a]["away"] += 1
+
+    return {
+        "grid": grid,
+        "metrics": metrics,
+        "max_day": max_day,
+        "total_teams": total_teams
+    }
+
+
+def get_invalid_league_off_days(slotted_games, asg_day=0, asg_before=2, asg_after=1):
+    """Returns league-wide off-days outside the scheduled All-Star shutdown."""
+    if not slotted_games:
+        return []
+
+    last_day = max(game["day"] for game in slotted_games)
+    game_days = {game["day"] for game in slotted_games}
+    asg_break = (
+        set(range(asg_day - asg_before, asg_day + asg_after + 1))
+        if asg_day > 0
+        else set()
+    )
+    if asg_break:
+        for boundary_day in (min(asg_break) - 1, max(asg_break) + 1):
+            if boundary_day in game_days:
+                continue
+            asg_break.add(boundary_day)
+    ordinary_off_days = {
+        day
+        for day in range(1, last_day + 1)
+        if day not in game_days and day not in asg_break
+    }
+    prohibited_boundary_days = {1, last_day}
+    if asg_day > 0:
+        prohibited_boundary_days.update(
+            (asg_day - asg_before - 1, asg_day + asg_after + 1)
+        )
+
+    return sorted(
+        day
+        for day in ordinary_off_days
+        if day in prohibited_boundary_days
+        or day - 1 in ordinary_off_days
+        or day + 1 in ordinary_off_days
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="OOTP Schedule XML Generator supporting Mixed-Length Series & Interactive Options"
@@ -591,7 +1371,6 @@ def main():
     parser.add_argument("-g", "--games", type=int, default=162)
     parser.add_argument("-il", "--interleague", type=int, choices=[0, 1], default=None)
     parser.add_argument("-bg", "--balanced", type=int, choices=[0, 1], default=0)
-    parser.add_argument("-u", "--uneven", type=int, choices=[0, 1], default=0, help="Allow uneven home/away splits (e.g., 13-game series)")
     parser.add_argument("-a", "--allstar-game-day", type=int, default=0, help="Target calendar day for the ASG")
     parser.add_argument("-aw", "--asg-weekday", type=str, default=None, help="Force ASG to fall on this day of the week (e.g., Thursday). Overrides -a.")
     parser.add_argument("-ab", "--asg-before", type=int, default=2)
@@ -601,6 +1380,18 @@ def main():
     parser.add_argument("-sd", "--start-day", type=int, default=1)
     parser.add_argument("-o", "--output", type=str, default=None)
     parser.add_argument("--non-interactive", action="store_true", help="Auto-select top breakdown option")
+    parser.add_argument(
+        "--distribution-option",
+        type=int,
+        default=None,
+        help="Select a displayed game distribution option (1-based)",
+    )
+    parser.add_argument(
+        "--solver-time-limit",
+        type=float,
+        default=20,
+        help="Maximum seconds for the CP-SAT fallback used when the fast matching scheduler fails",
+    )
 
     args = parser.parse_args()
 
@@ -622,13 +1413,18 @@ def main():
     s_opp = (args.divisions - 1) * args.teams_per_div
     i_opp = (args.subleagues - 1) * args.divisions * args.teams_per_div if il_flag == "1" else 0
 
-    solutions = find_all_valid_distributions(args.games, d_opp, s_opp, i_opp, is_balanced=(bg_flag == "1"), allow_uneven=(args.uneven == 1))
+    solutions = find_all_valid_distributions(args.games, d_opp, s_opp, i_opp, is_balanced=(bg_flag == "1"))
 
     if not solutions:
         print(f"Error: No valid game distributions found for {args.games} games.")
         sys.exit(1)
 
-    if args.non_interactive or not sys.stdin.isatty():
+    if args.distribution_option is not None:
+        if not 1 <= args.distribution_option <= len(solutions):
+            print(f"Error: Distribution option must be between 1 and {len(solutions)}.")
+            sys.exit(1)
+        chosen_sol = solutions[args.distribution_option - 1]
+    elif args.non_interactive or not sys.stdin.isatty():
         chosen_sol = solutions[0]
     else:
         chosen_sol = prompt_user_for_distribution(solutions, d_opp, s_opp, i_opp)
@@ -636,24 +1432,76 @@ def main():
     sl_parts = [f"SL{sl}_" + "_".join([f"D{d}_T{args.teams_per_div}" for d in range(1, args.divisions + 1)]) for sl in range(1, args.subleagues + 1)]
     type_attr = f"{il_prefix}_G{args.games}_" + "_".join(sl_parts)
 
+    # Ensure the assets directory exists
     output_dir = "assets"
     os.makedirs(output_dir, exist_ok=True)
 
+    # Prefix the filename with the assets directory
     base_filename = args.output if args.output else f"{type_attr}.lsdl"
     filename = os.path.join(output_dir, base_filename)
 
     windows, total_teams = build_dynamic_schedule(
         args.subleagues, args.divisions, args.teams_per_div, args.games, chosen_sol, interleague=(il_flag == "1")
     )
-    
-    slotted_games, final_asg_day = expand_to_slotted_games(
-        windows, 
-        target_asg_day=args.allstar_game_day, 
-        asg_before=args.asg_before, 
-        asg_after=args.asg_after,
-        asg_weekday_num=asg_weekday_num,
-        start_dow=sdw_num
-    )
+
+    # Fast path (sub-second): greedy round-based scheduler, which is what already
+    # guarantees series-consecutive scheduling. Try it regardless of team count first.
+    try:
+        slotted_games, final_asg_day = expand_to_slotted_games(
+            windows,
+            target_asg_day=args.allstar_game_day,
+            asg_before=args.asg_before,
+            asg_after=args.asg_after,
+            asg_weekday_num=asg_weekday_num,
+            start_dow=sdw_num,
+            avoid_league_off_days=True,
+            league_off_day_interval=5,
+            max_off_days_in_window=5,
+        )
+    except RuntimeError as error:
+        print(f"Greedy scheduler failed ({error}). Falling back to CP-SAT solver (this can take longer)...")
+        rest_season_length = min(200, int(args.games / 0.85 + 0.9999))
+        rest_target_day = args.allstar_game_day
+        total_window_days = sum(max(series["length"] for series in window) for window in windows if window)
+        if rest_target_day == 0 and asg_weekday_num is not None:
+            rest_target_day = (total_window_days + total_window_days // 7) // 2
+        if asg_weekday_num is not None:
+            weekday_adjustment = asg_weekday_num - get_weekday(rest_target_day, sdw_num)
+            if weekday_adjustment > 3:
+                weekday_adjustment -= 7
+            elif weekday_adjustment < -3:
+                weekday_adjustment += 7
+            rest_target_day += weekday_adjustment
+        rest_days_by_team = build_team_rest_calendar(
+            total_teams,
+            args.games,
+            rest_target_day,
+            asg_before=args.asg_before,
+            asg_after=args.asg_after,
+            season_length=rest_season_length,
+            time_limit_seconds=min(args.solver_time_limit, 10),
+        )
+        try:
+            slotted_games, final_asg_day = expand_to_game_level_games(
+                windows,
+                total_teams,
+                target_asg_day=args.allstar_game_day,
+                asg_before=args.asg_before,
+                asg_after=args.asg_after,
+                asg_weekday_num=asg_weekday_num,
+                start_dow=sdw_num,
+                time_limit_seconds=args.solver_time_limit,
+                rest_days_by_team=rest_days_by_team,
+                season_length=rest_season_length,
+                max_off_days_in_window=2,
+                enforce_venue_streak=False,
+                enforce_game_streak=False,
+            )
+        except RuntimeError as fallback_error:
+            raise RuntimeError(
+                "Both the greedy scheduler and the CP-SAT solver failed to produce a schedule for "
+                f"this configuration. Last error: {fallback_error}"
+            ) from fallback_error
 
     root_attrs = {
         "type": type_attr,
@@ -679,7 +1527,7 @@ def main():
         f.write(xmlstr)
 
     html_filename = filename.replace(".lsdl", ".html")
-    generate_html_report(slotted_games, total_teams, html_filename)
+    generate_html_report(slotted_games, total_teams, html_filename, asg_day=final_asg_day)
 
     print(f"\nGenerated {len(slotted_games)} total games across {total_teams} teams.")
     if final_asg_day > 0:
