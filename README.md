@@ -148,6 +148,21 @@ Before finalizing a season, the script evaluates the requested league structure 
 
 That validation step helps keep the generated season aligned with the league setup instead of producing an overly rigid or artificial calendar.
 
+## Scheduling Rules And Criteria
+
+When evaluating breakdown options and building the calendar, the generator is designed to follow these scheduling criteria:
+
+- Keep the complete schedule within a 200-day calendar.
+- Avoid off-days on the first or last day of the season.
+- Avoid consecutive team off-days outside the All-Star break.
+- Avoid league-wide off-days during the season, except for the All-Star break. The web generator can explicitly allow additional league-wide off-days when a configuration requires them.
+- Keep team off-days reasonably distributed, with no more than one off-day in a seven-day stretch where possible.
+- Limit extended home or road streaks, generally targeting no more than 10 to 13 consecutive games at one venue.
+- Target realistic stretches of consecutive games while never exceeding 20 consecutive games.
+- Preserve the requested games per team and the selected home/away, divisional, subleague, and interleague breakdown.
+
+Some criteria are scheduling goals rather than absolute guarantees for every league configuration. The available breakdown options are filtered by the requested league structure and game total, so a configuration may produce no valid options when its matchup requirements cannot fit the calendar rules.
+
 ## All-Star Break Handling
 
 The generator can place the All-Star break in a realistic point in the season rather than dropping it in arbitrarily. When a target day or weekday is provided, it tries to anchor the break to a sensible timeframe while preserving spacing around it and keeping the season flow intact.
