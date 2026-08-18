@@ -88,6 +88,8 @@ The screenshots below show the main flow in the public web app from the initial 
 - OOTP-ready XML output
 - HTML schedule report for quick visual validation
 
+Uneven home/away splits are not currently available in the production generator. Support for that scheduling option is planned for a future release.
+
 ## Quick Start
 
 Run the generator locally with a standard 162-game league setup:
