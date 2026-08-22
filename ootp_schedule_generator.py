@@ -1298,7 +1298,12 @@ def expand_to_slotted_games(
     )
     flexible_off_day_interval = league_off_day_interval or 7
 
-    if not avoid_league_off_days and actual_asg_day == 0 and len(rounds) > 2:
+    if (
+        not avoid_league_off_days
+        and not automatic_asg_day
+        and actual_asg_day == 0
+        and len(rounds) > 2
+    ):
         minimum_season_days = math.ceil((len(windows) and sum(
             series["length"] for window in windows for series in window
         ) * 2 // len(team_ids)) / 0.85)
