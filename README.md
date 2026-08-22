@@ -75,6 +75,8 @@ The screenshots below show the main flow in the public web app from the initial 
 
 ![Saving the generated schedule file](./static/ootpschedules.com-4.png)
 
+The web workflow also supports guided game-total selection, schedule preview before download, optional league-wide off-days, All-Star Game scheduling, and clearing the current selection to start over.
+
 ## Features
 
 - Multiple subleagues and divisions
@@ -85,6 +87,7 @@ The screenshots below show the main flow in the public web app from the initial 
 - Balanced home and away game totals
 - Calendar-aware pacing across the season
 - All-Star break placement tied to target timing and weekday preferences
+- League-wide off-day controls when a configuration requires additional rest days
 - OOTP-ready XML output
 - HTML schedule report for quick visual validation
 
@@ -141,6 +144,8 @@ The script supports a range of configuration options for real league setups:
 - `-sd, --start-day`: Day of the month the season begins on
 - `-o, --output`: Custom output filename
 - `--non-interactive`: Skip the prompt and automatically choose the first valid schedule
+- `--distribution-option`: Select a displayed game distribution option by its 1-based number
+- `--solver-time-limit`: Maximum seconds for the CP-SAT fallback when the fast scheduler fails
 
 ## How It Works
 
@@ -154,11 +159,15 @@ When evaluating breakdown options and building the calendar, the generator is de
 
 - Keep the complete schedule within a 200-day calendar.
 - Avoid off-days on the first or last day of the season.
+- Avoid off-days on the day before or after the All-Star break.
 - Avoid consecutive team off-days outside the All-Star break.
 - Avoid league-wide off-days during the season, except for the All-Star break. The web generator can explicitly allow additional league-wide off-days when a configuration requires them.
-- Keep team off-days reasonably distributed, with no more than one off-day in a seven-day stretch where possible.
+- Target 7-15% of each team schedule as off-days and never exceed 25%.
+- Keep team off-days reasonably distributed, with no more than one off-day in a seven-day stretch where possible. If no valid schedule exists, spacing may fall back to six, five, or four days.
 - Limit extended home or road streaks, generally targeting no more than 10 to 13 consecutive games at one venue.
-- Target realistic stretches of consecutive games while never exceeding 20 consecutive games.
+- Target realistic stretches of consecutive games while never exceeding the configured maximum of 17 to 20 consecutive scheduled games. An off-day resets the streak and does not count as a game.
+- Prefer three-game series, followed by four-game and then two-game series; one-game series are not used.
+- Keep each series entirely at one team's ballpark.
 - Preserve the requested games per team and the selected home/away, divisional, subleague, and interleague breakdown.
 
 Some criteria are scheduling goals rather than absolute guarantees for every league configuration. The available breakdown options are filtered by the requested league structure and game total, so a configuration may produce no valid options when its matchup requirements cannot fit the calendar rules.
@@ -191,7 +200,8 @@ This project is designed for:
 ## Notes
 
 - Python 3 is required to run the local script.
-- No external dependencies are required for the base generator.
+- Install the Python dependencies with `pip install networkx ortools`.
+- Generated `.lsdl` and `.html` files are written to the `assets/` directory.
 - The output is designed for OOTP schedule import and league planning workflows.
 - The project is provided as-is and can be adapted to fit custom league formats and season rules.
 
