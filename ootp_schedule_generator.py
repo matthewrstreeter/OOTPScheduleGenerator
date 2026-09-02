@@ -1013,6 +1013,7 @@ def _place_series_into_days(
     team_streak = {team: 0 for team in team_ids}
     last_venue = {team: None for team in team_ids}
     venue_streak = {team: 0 for team in team_ids}
+    last_pair_end = {}
     prebreak_shifted = False
     scheduled_days = {team: set() for team in team_ids}
     last_league_off_day = None
@@ -1044,6 +1045,7 @@ def _place_series_into_days(
                 or (
                     league_off_day_interval is None
                     and compatible_series_schedule
+                    and not mixed_compatible_schedule
                     and round_index % 2 == 0
                 )
                 or (
@@ -1121,6 +1123,10 @@ def _place_series_into_days(
         forced_stagger_indices = set()
         if 0 < round_index < len(rounds) - 1:
             for series_index, series in enumerate(round_series):
+                pair = tuple(sorted((series["home"], series["away"])))
+                if last_pair_end.get(pair) == next_start_day - 1:
+                    forced_stagger_indices.add(series_index)
+                    continue
                 for team in (series["home"], series["away"]):
                     contiguous = last_game_day[team] is not None and last_game_day[team] + 1 == next_start_day
                     prospective_streak = (
@@ -1236,6 +1242,7 @@ def _place_series_into_days(
                 last_venue[team] = venue
             last_game_day[h] = series_start_day + length - 1
             last_game_day[a] = series_start_day + length - 1
+            last_pair_end[tuple(sorted((h, a)))] = series_start_day + length - 1
             scheduled_days[h].update(range(series_start_day, series_start_day + length))
             scheduled_days[a].update(range(series_start_day, series_start_day + length))
 
@@ -1413,12 +1420,20 @@ def expand_to_slotted_games(
         return candidate_games
 
     slotted_games = place_for_asg(actual_asg_day)
-    if slotted_games is None and automatic_asg_day:
+    if slotted_games is None and (automatic_asg_day or actual_asg_day > 0):
         for offset in range(1, 15):
             for candidate_day in (target_asg_day - offset, target_asg_day + offset):
                 if candidate_day <= asg_before + 1:
                     continue
-                candidate_games = place_for_asg(candidate_day)
+                if (
+                    asg_weekday_num is not None
+                    and get_weekday(candidate_day, start_dow) != asg_weekday_num
+                ):
+                    continue
+                try:
+                    candidate_games = place_for_asg(candidate_day)
+                except RuntimeError:
+                    continue
                 if candidate_games is not None:
                     actual_asg_day = candidate_day
                     slotted_games = candidate_games
@@ -1756,10 +1771,10 @@ def _expand_large_schedule_with_cp_sat(
     model.AddMaxEquality(final_day, ends)
     model.Minimize(final_day)
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 8
+    solver.parameters.max_time_in_seconds = 20
     solver.parameters.num_search_workers = CPU_SEARCH_WORKERS
 
-    for _ in range(8):
+    for _ in range(40):
         status = solver.Solve(model)
         if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             raise RuntimeError(f"Unable to place large-league series (solver status: {solver.StatusName(status)}).")
